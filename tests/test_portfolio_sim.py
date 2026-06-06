@@ -29,6 +29,7 @@ from portfolio_sim import (
     make_fx_provider,
     make_price_provider,
     reconcile_holdings,
+    simulate_from_snapshot,
     simulate_portfolio,
     simulate_portfolio_partial,
     validate_holdings,
@@ -791,3 +792,142 @@ class TestInitializeLotsFromHoldings:
         lots = initialize_lots_from_holdings(df)
         assert len(lots) == 0
         assert list(lots.columns) == LOT_COLUMNS
+
+
+# ── Slice 7: simulate_from_snapshot ───────────────────────────────────────────
+
+_NVDA = "US67066G1040"
+_DBK = "DE0005140008"
+
+
+def _initial_lots() -> pd.DataFrame:
+    """Two snapshot lots: NVDA @ 89.20 EUR/share × 34, DBK @ 12.50 × 100."""
+    return pd.DataFrame(
+        {
+            "isin": [_NVDA, _DBK],
+            "lot_date": ["2026-01-01", "2026-01-01"],
+            "lot_price_eur": [89.20, 12.50],
+            "remaining_shares": [34.0, 100.0],
+        }
+    )
+
+
+def _empty_txns() -> pd.DataFrame:
+    return pd.DataFrame(columns=TRANSACTION_COLUMNS)
+
+
+class TestSimulateFromSnapshot:
+    def test_no_new_transactions_computes_unrealised_gain(self):
+        lots = _initial_lots()
+        prices = {_NVDA: 130.0, _DBK: 15.0}
+        result = simulate_from_snapshot(
+            initial_lots=lots,
+            new_transactions=_empty_txns(),
+            current_prices_eur=prices,
+            capital_gains_tax_rate=0.26375,
+            dividend_tax_rate=0.26375,
+            reporting_date="2026-06-06",
+        )
+        nvda = result[result["isin"] == _NVDA].iloc[0]
+        # 34 × 130 = 4420; cost = 34 × 89.20 = 3032.80; gain = 1387.20
+        assert nvda["market_value_eur"] == pytest.approx(4420.0, abs=0.01)
+        assert nvda["unrealised_gain_eur"] == pytest.approx(1387.20, abs=0.01)
+
+    def test_new_buy_adds_second_lot(self):
+        lots = _initial_lots()
+        new_tx = pd.DataFrame(
+            [
+                _tx(
+                    isin=_NVDA,
+                    transaction_type="buy",
+                    date="2026-03-01",
+                    quantity=10.0,
+                    price=110.0,
+                    currency="EUR",
+                    amount=1100.0,
+                )
+            ]
+        )
+        prices = {_NVDA: 130.0, _DBK: 15.0}
+        result = simulate_from_snapshot(
+            initial_lots=lots,
+            new_transactions=new_tx,
+            current_prices_eur=prices,
+            capital_gains_tax_rate=0.26375,
+            dividend_tax_rate=0.26375,
+            reporting_date="2026-06-06",
+        )
+        nvda = result[result["isin"] == _NVDA].iloc[0]
+        # (34 + 10) × 130 = 5720; cost = 34×89.20 + 10×110 = 3032.80 + 1100 = 4132.80
+        assert nvda["market_value_eur"] == pytest.approx(5720.0, abs=0.01)
+        assert nvda["unrealised_gain_eur"] == pytest.approx(1587.20, abs=0.01)
+
+    def test_new_sell_reduces_lots_and_realises_gain(self):
+        lots = _initial_lots()
+        new_tx = pd.DataFrame(
+            [
+                _tx(
+                    isin=_DBK,
+                    transaction_type="sell",
+                    date="2026-03-01",
+                    quantity=50.0,
+                    price=15.0,
+                    currency="EUR",
+                    amount=750.0,
+                )
+            ]
+        )
+        prices = {_NVDA: 130.0, _DBK: 15.0}
+        result = simulate_from_snapshot(
+            initial_lots=lots,
+            new_transactions=new_tx,
+            current_prices_eur=prices,
+            capital_gains_tax_rate=0.25,
+            dividend_tax_rate=0.25,
+            reporting_date="2026-06-06",
+        )
+        dbk = result[result["isin"] == _DBK].iloc[0]
+        # Sold 50 @ 15 from lot @ 12.50 → gain = 50 × (15 - 12.50) = 125
+        assert dbk["realised_gain_ytd_eur"] == pytest.approx(125.0, abs=0.01)
+        assert dbk["tax_paid_ytd_eur"] == pytest.approx(31.25, abs=0.01)
+        # Remaining: 50 shares × 15 = 750
+        assert dbk["market_value_eur"] == pytest.approx(750.0, abs=0.01)
+
+    def test_accepts_list_of_dicts_as_initial_lots(self):
+        lots_list = _initial_lots().to_dict(orient="records")
+        prices = {_NVDA: 130.0, _DBK: 15.0}
+        result = simulate_from_snapshot(
+            initial_lots=lots_list,
+            new_transactions=_empty_txns(),
+            current_prices_eur=prices,
+            capital_gains_tax_rate=0.26375,
+            dividend_tax_rate=0.26375,
+            reporting_date="2026-06-06",
+        )
+        assert len(result) == 2
+
+    def test_output_has_simulation_output_columns(self):
+        lots = _initial_lots()
+        prices = {_NVDA: 130.0}
+        result = simulate_from_snapshot(
+            initial_lots=lots,
+            new_transactions=_empty_txns(),
+            current_prices_eur=prices,
+            capital_gains_tax_rate=0.26375,
+            dividend_tax_rate=0.26375,
+        )
+        assert list(result.columns) == SIMULATION_OUTPUT_COLUMNS
+
+    def test_isin_absent_from_prices_gives_zero_market_value(self):
+        lots = _initial_lots()
+        prices = {_NVDA: 130.0}  # DBK missing
+        result = simulate_from_snapshot(
+            initial_lots=lots,
+            new_transactions=_empty_txns(),
+            current_prices_eur=prices,
+            capital_gains_tax_rate=0.26375,
+            dividend_tax_rate=0.26375,
+            reporting_date="2026-06-06",
+        )
+        dbk = result[result["isin"] == _DBK]
+        assert len(dbk) == 0  # ISINs absent from prices and with no realised gain are omitted

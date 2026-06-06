@@ -850,3 +850,134 @@ def simulate_portfolio_partial(
     )
 
     return result, excluded
+
+
+def simulate_from_snapshot(
+    initial_lots: pd.DataFrame | list[dict],
+    new_transactions: pd.DataFrame,
+    current_prices_eur: dict[str, float],
+    capital_gains_tax_rate: float,
+    dividend_tax_rate: float,
+    fx_provider: FXProvider | None = None,
+    reporting_date: str | None = None,
+) -> pd.DataFrame:
+    """
+    Simulate a portfolio starting from a pre-seeded lot ledger (snapshot mode).
+
+    Use this when you have a broker statement with cost-basis data — seed the
+    lot ledger with ``initialize_lots_from_holdings``, pass only the *new*
+    transactions that occurred after the statement date, and compute current
+    portfolio value and gains.
+
+    Parameters
+    ----------
+    initial_lots : pd.DataFrame | list[dict]
+        Starting lot ledger in LOT_COLUMNS schema.  Typically produced by
+        ``initialize_lots_from_holdings``.  Both DataFrame and list-of-dicts
+        are accepted.
+    new_transactions : pd.DataFrame
+        Transactions to replay on top of the snapshot (may be empty).
+        Must conform to TRANSACTION_COLUMNS schema.  Only ``buy``, ``sell``,
+        ``split``, ``dividend``, and ``tax_withheld`` have lot/P&L effects;
+        other types are silently ignored, consistent with ``simulate_portfolio``.
+    current_prices_eur : dict[str, float]
+        Map of ISIN → current price in EUR.  ISINs absent from this dict
+        *and* from any realised gain accumulation are omitted from the output.
+    capital_gains_tax_rate : float
+        Flat rate applied to realised capital gains (e.g. 0.26375 for Germany).
+    dividend_tax_rate : float
+        Flat rate applied to dividend income.
+    fx_provider : FXProvider | None
+        Defaults to ECBProvider if None.
+    reporting_date : str | None
+        ISO date for the output rows.  Defaults to the latest new transaction
+        date, or today's date if new_transactions is empty.
+
+    Returns
+    -------
+    pd.DataFrame
+        SIMULATION_OUTPUT_COLUMNS schema — one row per ISIN that appears in
+        current_prices_eur or has realised gain/income.
+    """
+    if fx_provider is None:
+        fx_provider = ECBProvider()
+
+    # Normalise initial_lots to a mutable list[dict]
+    if isinstance(initial_lots, pd.DataFrame):
+        lots: list[dict] = initial_lots[LOT_COLUMNS].to_dict(orient="records")
+    else:
+        lots = [dict(lot) for lot in initial_lots]
+
+    realised_gain: dict[str, float] = {}
+    tax_paid: dict[str, float] = {}
+
+    if not new_transactions.empty:
+        txns = new_transactions.sort_values("date").reset_index(drop=True)
+        for _, row in txns.iterrows():
+            isin = row["isin"]
+            tx_type = row["transaction_type"]
+            currency = str(row["currency"])
+            date = str(row["date"])
+
+            realised_gain.setdefault(isin, 0.0)
+            tax_paid.setdefault(isin, 0.0)
+
+            if tx_type == "buy":
+                price_eur = fx_provider.convert(float(row["price"]), currency, "EUR", date)
+                apply_buy(lots, isin, date, price_eur, float(row["quantity"]))
+
+            elif tx_type == "sell":
+                price_eur = fx_provider.convert(float(row["price"]), currency, "EUR", date)
+                lots, gain, tax = apply_sell_fifo(
+                    lots, isin, float(row["quantity"]), price_eur, capital_gains_tax_rate
+                )
+                realised_gain[isin] += gain
+                tax_paid[isin] += tax
+
+            elif tx_type == "split":
+                lots = apply_split(lots, isin, float(row["quantity"]))
+
+            elif tx_type == "dividend":
+                amount_eur = fx_provider.convert(float(row["amount"]), currency, "EUR", date)
+                dividend_tax = amount_eur * dividend_tax_rate
+                realised_gain[isin] += amount_eur
+                tax_paid[isin] += dividend_tax
+
+            elif tx_type == "tax_withheld":
+                withheld = fx_provider.convert(
+                    abs(float(row["tax_withheld"])), currency, "EUR", date
+                )
+                tax_paid[isin] += withheld
+
+        if reporting_date is None:
+            reporting_date = str(txns["date"].max())
+    else:
+        txns = None
+
+    if reporting_date is None:
+        from datetime import date as _date
+
+        reporting_date = _date.today().isoformat()
+
+    all_isins = sorted(set(current_prices_eur) | set(realised_gain))
+    rows = []
+    for isin in all_isins:
+        current_price = current_prices_eur.get(isin, 0.0)
+        isin_lots = [lot for lot in lots if lot["isin"] == isin]
+        total_shares = sum(lot["remaining_shares"] for lot in isin_lots)
+        total_cost_basis = sum(lot["lot_price_eur"] * lot["remaining_shares"] for lot in isin_lots)
+        market_value = current_price * total_shares
+        unrealised_gain = market_value - total_cost_basis
+
+        rows.append(
+            {
+                "isin": isin,
+                "reporting_date": reporting_date,
+                "market_value_eur": round(market_value, 2),
+                "unrealised_gain_eur": round(unrealised_gain, 2),
+                "realised_gain_ytd_eur": round(realised_gain.get(isin, 0.0), 2),
+                "tax_paid_ytd_eur": round(tax_paid.get(isin, 0.0), 2),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=SIMULATION_OUTPUT_COLUMNS)
