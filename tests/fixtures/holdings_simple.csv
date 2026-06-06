@@ -1,2 +1,2 @@
 date,isin,wkn,asset_name,quantity,price,currency,market_value,jurisdiction
-2023-12-31,DE0005140008,514000,Deutsche Bank AG,70,15.50,EUR,1085.00,DE
+2023-12-31,DE00SYNTH001,SYN001,Synthetic Equity Alpha,70,15.50,EUR,1085.00,DE

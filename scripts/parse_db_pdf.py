@@ -8,8 +8,8 @@ Extracts:
 
 Usage (inside Docker):
     python scripts/parse_db_pdf.py \\
-        --input data/private/report.pdf \\
-        --output-dir data/private/
+        --input /path/to/deutsche-bank-report.pdf \\
+        --output-dir /path/to/output-dir
 
 Output files are written to <output-dir>/<pdf-stem>_{transactions,holdings}.{csv,parquet}.
 

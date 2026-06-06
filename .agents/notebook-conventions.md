@@ -33,5 +33,7 @@ Tables should explain key columns before or immediately after the table.
 Keep notebooks as thin analysis/reporting layers. Shared calculations belong in:
 
 ```text
-src/tax_risk_sim.py
+src/tax_risk_sim.py   ← single-position calculations
+src/portfolio_sim.py  ← portfolio calculations and provider interfaces
+src/pdf_parser.py     ← Deutsche Bank PDF parsing
 ```

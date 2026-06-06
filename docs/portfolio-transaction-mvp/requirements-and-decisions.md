@@ -25,10 +25,22 @@ Transactions are the source of truth when available. Holdings snapshots are used
 for reconciliation and validation against broker-reported positions.
 
 ## Deutsche Bank PDF strategy
-Do not implement the real Deutsche Bank PDF parser in the first slice. Define
-the schema, validation, simulation engine, adapter interface, and synthetic
-fixtures first. Add the real parser once a redacted/synthetic PDF fixture or
-real table sample is available.
+The original MVP decision was to defer a real Deutsche Bank PDF parser until a
+redacted/synthetic PDF fixture or real table sample was available.
+
+That follow-up has now been implemented for the Deutsche Bank
+Vermögensanlage-Report format:
+
+```text
+src/pdf_parser.py
+scripts/parse_db_pdf.py
+tests/test_pdf_parser.py
+```
+
+The parser extracts transaction rows from the `Umsätze` section and holdings
+with cost basis from the `Vermögensaufstellung mit Einstandskursen` section. It
+returns canonical transaction and holdings DataFrames compatible with the
+portfolio simulation layer.
 
 ## Required security fields
 Validated holdings require:
@@ -39,8 +51,14 @@ Validated holdings require:
 Lookup and identifier resolution are out of scope for v1.
 
 ## Pricing
-Security prices must come from broker or validated input data in v1. Do not
-fetch stock or ETF market prices automatically yet.
+The original v1 decision was that security prices should come from broker or
+validated input data, not automatic market fetching.
+
+The current implementation keeps that reproducible path through
+`StaticPriceProvider`, and also adds optional Yahoo-backed security price lookup
+through a user-maintained ISIN → Yahoo ticker map. Live security pricing is used
+by the real-portfolio snapshot and stop-loss workflows, but it is not required
+for the canonical CSV/Parquet simulation path.
 
 ## FX
 FX rates are fetched through a configurable provider interface.
@@ -119,11 +137,41 @@ data/examples/
 tests/fixtures/
 ```
 
+## Current implemented workflows
+
+The project now has three portfolio-facing workflows:
+
+```text
+scripts/normalize_portfolio_inputs.py
+scripts/validate_portfolio_inputs.py
+notebooks/06_portfolio_transaction_simulation.ipynb
+```
+
+Use these for canonical CSV/Parquet input validation and the synthetic
+transaction-aware MVP.
+
+```text
+scripts/parse_db_pdf.py
+```
+
+Use this to parse a Deutsche Bank Vermögensanlage-Report PDF into canonical
+transactions and holdings files.
+
+```text
+scripts/portfolio_snapshot.py
+scripts/stop_loss_real_portfolio.py
+notebooks/07_real_portfolio_stop_loss.ipynb
+```
+
+Use these for real-portfolio snapshot reporting and applying stop-loss /
+re-entry analysis across holdings seeded from the Deutsche Bank PDF.
+
 ## Known limitations
 
-**PDF parser:** The first implementation will not parse real Deutsche Bank PDFs.
-It will create the adapter boundary and use synthetic Deutsche Bank-like CSV
-fixtures to prove the pipeline and model behavior.
+**PDF parser:** Only the Deutsche Bank Vermögensanlage-Report format observed in
+the current private sample is supported. Other report types such as
+Kontoauszug, Wertpapierabrechnung, or differently formatted PDF statements are
+out of scope until fixtures are available.
 
 **German tax simplifications:** The flat capital gains tax rate does not model
 the Sparer-Pauschbetrag (annual tax-free allowance: €1,000 single / €2,000
@@ -134,6 +182,6 @@ church tax are also excluded from the flat rate. The `jurisdiction` field in
 the transaction schema is reserved for future jurisdiction-aware tax logic.
 
 **Reverse split fractional shares:** Fractional shares resulting from a reverse
-split are treated in v1 as a cash distribution at the prevailing price. The
-correct tax treatment (dividend-equivalent subject to KeSt in Germany) is noted
-but not modelled. This is flagged in the output as a known approximation.
+split are retained at full precision in the lot ledger. No cash distribution is
+generated. The correct tax treatment, potentially dividend-equivalent subject to
+KeSt in Germany, is noted but not modelled.

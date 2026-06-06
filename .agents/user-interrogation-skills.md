@@ -140,7 +140,9 @@ Use when:
 How to apply it here:
 
 - Look for deepening opportunities: small interfaces with useful behavior behind them.
-- Prefer consolidating calculations into `src/tax_risk_sim.py`.
+- Prefer consolidating single-position calculations into `src/tax_risk_sim.py`,
+  portfolio calculations/provider interfaces into `src/portfolio_sim.py`, and
+  Deutsche Bank parsing into `src/pdf_parser.py`.
 - Keep notebooks as thin reporting layers.
 - Apply the deletion test: if deleting a helper merely moves complexity into many callers, it was useful; if deleting it removes complexity, it may be shallow.
 - Present candidates with problem, solution, benefits, tests improved, and recommendation strength.
@@ -192,6 +194,8 @@ Do not ask when the answer is discoverable from:
 
 ```text
 src/tax_risk_sim.py
+src/portfolio_sim.py
+src/pdf_parser.py
 notebooks/
 .agents/
 tests/

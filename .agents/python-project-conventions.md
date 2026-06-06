@@ -19,7 +19,9 @@
 Shared model logic belongs in:
 
 ```text
-src/tax_risk_sim.py
+src/tax_risk_sim.py   ← single-position calculations
+src/portfolio_sim.py  ← portfolio calculations and provider interfaces
+src/pdf_parser.py     ← Deutsche Bank PDF parsing
 ```
 
 Tests belong in:
@@ -108,6 +110,8 @@ Before writing any code, convene a council of the relevant specialist personas t
 | Plan touches | Invoke |
 |---|---|
 | `src/tax_risk_sim.py` or `src/inputs.py` | Python Staff Engineer + Senior Financial Model Reviewer |
+| `src/portfolio_sim.py` | Python Staff Engineer + Senior Financial Model Reviewer |
+| `src/pdf_parser.py` or broker input parsing | Python Staff Engineer + Senior Financial Model Reviewer |
 | Financial formulas, scenario math, expected value | Senior Financial Model Reviewer |
 | Tax assumptions, rates, timing, jurisdiction | Germany / Italy / EU Tax Reviewer |
 | Bear/bull scenarios, drawdown ranges, recovery probabilities | Senior Market Analyst |
@@ -199,6 +203,48 @@ Anything the change does not cover, defers, or intentionally simplifies.
 
 Do not leave documentation stubs. If a section has nothing to say, omit it.
 
+### Step 4 — Reconcile plans and docs before stopping
+
+Before the agent sends a final response or considers a change complete, perform
+a documentation reconciliation audit.
+
+Required checks:
+
+```text
+1. Re-read the active plan file in agent-planning/.
+2. Confirm every implemented slice is marked [x].
+3. Confirm every unimplemented slice remains [ ] and is called out in the final response.
+4. Re-read the relevant docs/ page(s).
+5. Search for stale statements that contradict the implementation.
+6. Update docs and plans if scope changed, follow-up features were added, or assumptions changed.
+7. Run `git status --short` and mention remaining unrelated/untracked files.
+```
+
+Use `rg` for the stale-statement search. Search for terms tied to the work, such
+as feature names, deferred items, "not implemented", "out of scope", "known
+limitations", changed file names, and old assumption names.
+
+Documentation and plan reconciliation is mandatory when:
+
+- a planned deferred feature becomes implemented
+- the user corrects a mistake, changes their mind, or changes a parameter,
+  privacy boundary, file location, schema, workflow, or default
+- implementation adds files or workflows not named in the original plan
+- a modeling, tax, pricing, FX, parser, or data-source assumption changes
+- notebooks or scripts are added after the original plan
+- tests prove behavior that docs still describe as unsupported
+- the agent made commits or multiple vertical slices in one session
+
+If code and docs disagree, treat the code and tests as the behavioral source of
+truth, then update the docs/plans to describe that truth. Do not leave stale
+"deferred", "not implemented", or "out of scope" statements in place after
+implementing the feature.
+
+When the user points out a mistake or changes a decision, do not only patch the
+immediate file. Also update any affected README, `AGENTS.md`, `.agents/` notes,
+plans, docs, scripts, notebooks, examples, and tests in the same turn unless the
+user explicitly asks for a narrower change.
+
 ### Develop in small vertical slices
 
 ```text
@@ -236,7 +282,9 @@ Archived notebooks are reference material only. Active behavior should come from
 
 ```text
 src/tax_risk_sim.py
-notebooks/01_*.ipynb ... notebooks/05_*.ipynb
+src/portfolio_sim.py
+src/pdf_parser.py
+notebooks/01_*.ipynb ... notebooks/07_*.ipynb
 tests/
 ```
 

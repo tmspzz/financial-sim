@@ -24,12 +24,18 @@ The new code lives entirely in `src/portfolio_sim.py` and is tested by
 | `scripts/normalize_portfolio_inputs.py` | Reads a raw CSV, validates it, writes a clean CSV and Parquet |
 | `scripts/validate_portfolio_inputs.py` | Validates a portfolio CSV and prints a human-readable report |
 | `notebooks/06_portfolio_transaction_simulation.ipynb` | Reads validated Parquet, runs simulation, shows reconciliation and portfolio report |
+| `src/pdf_parser.py` | Parses Deutsche Bank Vermögensanlage-Report PDFs into canonical transactions and holdings |
+| `tests/test_pdf_parser.py` | Unit tests for text parsing plus skipped private-PDF integration tests |
+| `scripts/parse_db_pdf.py` | CLI wrapper that writes parsed Deutsche Bank transactions and holdings as CSV and Parquet |
+| `scripts/portfolio_snapshot.py` | Parses a Deutsche Bank PDF, seeds lots from broker holdings, fetches prices, and prints a portfolio snapshot |
+| `scripts/stop_loss_real_portfolio.py` | Applies stop-loss / re-entry analysis across real PDF-derived holdings |
+| `notebooks/07_real_portfolio_stop_loss.ipynb` | Notebook report for real portfolio stop-loss / re-entry analysis |
 
 ## Files modified
 
 | File | Change |
 |------|--------|
-| `requirements-dev.txt` | Added `requests` (ECB/Yahoo HTTP) and `pyarrow` (Parquet I/O) |
+| `requirements-dev.txt` | Added `requests` (ECB/Yahoo HTTP), `pyarrow` (Parquet I/O), and `pdfplumber` (PDF parsing) |
 | `.github/workflows/ci.yml` | Added `requests pyarrow` to the pip install step |
 | `.gitignore` | Added `data/private/` before any real data could be committed |
 | `agent-planning/portfolio-transaction-mvp.md` | All 10 slices marked complete |
@@ -47,6 +53,11 @@ scripts/normalize_portfolio_inputs.py
    -> writes normalized CSV (human review)
    -> writes Parquet (notebooks and simulation)
 
+scripts/parse_db_pdf.py
+   reads Deutsche Bank Vermögensanlage-Report PDF
+   -> extracts transactions + holdings/cost basis
+   -> writes canonical CSV and Parquet
+
 notebooks/06_portfolio_transaction_simulation.ipynb
    reads Parquet
    -> configures FX provider (ECB default, Yahoo or FixedRate alternatives)
@@ -54,6 +65,19 @@ notebooks/06_portfolio_transaction_simulation.ipynb
    -> simulate_portfolio_partial() → output DataFrame
    -> reconcile_holdings() against broker snapshot
    -> lots_to_dataframe() + derived unrealised gain per lot
+
+scripts/portfolio_snapshot.py / notebooks/07_real_portfolio_stop_loss.ipynb
+   parse Deutsche Bank PDF
+   -> initialize_lots_from_holdings()
+   -> fetch current prices from a static map or Yahoo ticker map
+   -> report per-ISIN market value and gains
+
+scripts/stop_loss_real_portfolio.py
+   parse Deutsche Bank PDF
+   -> seed lots from holdings with cost basis
+   -> fetch current prices
+   -> run the existing single-position stop/re-entry model for every holding
+   -> print ranked per-position stop-loss summary
 ```
 
 ## Key design decisions
@@ -107,6 +131,30 @@ in both transaction and holdings schemas. It is captured in all fixtures and
 example data but is not yet used to vary tax logic. It is reserved for future
 jurisdiction-aware tax treatment.
 
+### Deutsche Bank PDF parser
+
+The PDF parser is implemented in `src/pdf_parser.py` for the Deutsche Bank
+Vermögensanlage-Report format. It parses the `Umsätze` transaction section and
+the `Vermögensaufstellung mit Einstandskursen` holdings section. The parser is
+text-based because `pdfplumber` did not expose reliable tables for this report.
+
+The parser derives split ratios from Deutsche Bank
+`Kapitaltransaktion` rows by replaying prior buy/sell share counts and replacing
+the reported new-share count with the ratio expected by `apply_split()`.
+
+### Real portfolio price providers
+
+Security prices were originally planned as broker/validated-input-provided only.
+The current implementation also includes optional `PriceProvider` abstractions:
+
+- `StaticPriceProvider` for offline JSON-provided prices.
+- `YahooPriceProvider` for live prices using a user-supplied ISIN → Yahoo ticker
+  map, with FX conversion through the configured FX provider.
+
+This is used by `scripts/portfolio_snapshot.py`,
+`scripts/stop_loss_real_portfolio.py`, and
+`notebooks/07_real_portfolio_stop_loss.ipynb`.
+
 ## Assumptions
 
 - Security prices at the reporting date are supplied by the caller. The simulation
@@ -115,8 +163,8 @@ jurisdiction-aware tax treatment.
   applied in v1.
 - Transaction-date FX rates are used throughout. Intraday spot rates are not
   modelled.
-- The synthetic data uses Deutsche Bank AG (DE), iShares Core MSCI World ETF (IE),
-  and Apple Inc (US) as representative examples of domestic, EU, and US securities.
+- The synthetic data uses anonymized security names and synthetic identifiers as
+  representative examples of domestic, EU, and US securities.
 
 ## Known limitations
 
@@ -128,4 +176,8 @@ jurisdiction-aware tax treatment.
 | Unsupported corporate actions | `merger`, `spin_off`, `option` block the affected ISIN from trusted totals. There is no partial-valuation model for in-progress corporate actions. |
 | Jurisdiction-aware tax | `jurisdiction` field is captured and validated but not yet used to branch tax logic by country. Italian or other EU treatments are deferred. |
 | Transaction-date FX | Cross-currency lots use the FX rate on the transaction date. If the same security is bought in multiple currencies on different dates the basis is consistent within each lot but no average is taken across lots. |
-| PDF parser | Deutsche Bank PDF parsing is deferred. The adapter boundary is defined (validated CSV in canonical schema) but not implemented. |
+| PDF parser | Implemented for the observed Deutsche Bank Vermögensanlage-Report format only. Other Deutsche Bank report types or changed layouts need fixtures and parser updates. |
+| Security price lookup | Optional Yahoo-backed price lookup now exists, but requires a user-maintained ISIN → ticker map. Missing mappings are skipped or warned, so reports can exclude positions without mapped prices. |
+
+Real ticker maps should live in ignored `data/private/ticker_map.json`. The committed
+example map is `data/examples/ticker_map_synthetic.json`.

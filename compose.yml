@@ -1,6 +1,11 @@
 services:
   jupyter:
-    image: quay.io/jupyter/scipy-notebook:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: financial-sim:latest
+    environment:
+      PYTHONPATH: /home/jovyan/work/src
     ports:
       - "8888:8888"
     volumes:

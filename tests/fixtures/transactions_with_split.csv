@@ -1,4 +1,4 @@
 date,isin,wkn,asset_name,transaction_type,quantity,price,currency,amount,fees,tax_withheld,jurisdiction
-2023-01-15,DE0005140008,514000,Deutsche Bank AG,buy,100,14.00,EUR,1400.00,9.90,0.00,DE
-2023-06-01,DE0005140008,514000,Deutsche Bank AG,split,2.0,0,EUR,0.00,0.00,0.00,DE
-2023-09-15,DE0005140008,514000,Deutsche Bank AG,sell,50,8.50,EUR,425.00,9.90,0.00,DE
+2023-01-15,DE00SYNTH001,SYN001,Synthetic Equity Alpha,buy,100,14.00,EUR,1400.00,9.90,0.00,DE
+2023-06-01,DE00SYNTH001,SYN001,Synthetic Equity Alpha,split,2.0,0,EUR,0.00,0.00,0.00,DE
+2023-09-15,DE00SYNTH001,SYN001,Synthetic Equity Alpha,sell,50,8.50,EUR,425.00,9.90,0.00,DE

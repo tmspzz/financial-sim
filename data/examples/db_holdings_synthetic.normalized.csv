@@ -1,0 +1,4 @@
+date,isin,wkn,asset_name,quantity,price,currency,market_value,jurisdiction
+2023-12-31,DE00SYNTH001,SYN001,Synthetic Equity Alpha,275,15.6,EUR,4290.0,DE
+2023-12-31,IE00SYNTH002,,Synthetic ETF Beta,30,87.2,EUR,2616.0,IE
+2023-12-31,US00SYNTH003,,Synthetic Equity Gamma,10,192.5,USD,1925.0,US

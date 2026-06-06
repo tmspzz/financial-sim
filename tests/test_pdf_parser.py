@@ -2,11 +2,12 @@
 Tests for the Deutsche Bank PDF parser (src/pdf_parser.py).
 
 Unit tests use hardcoded text fixtures (no PDF file needed).
-Integration tests run only when the private PDF is present.
+Integration tests run only when DB_PDF_TEST_PATH points to a local private PDF.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -23,8 +24,8 @@ from pdf_parser import (
     _parse_tx_block,
 )
 
-# Integration test: real PDF (gitignored)
-REAL_PDF = Path("data/private/report.pdf")
+_PDF_TEST_PATH = os.environ.get("DB_PDF_TEST_PATH")
+REAL_PDF = Path(_PDF_TEST_PATH) if _PDF_TEST_PATH else None
 
 
 class TestParseGermanNumber:
@@ -61,19 +62,19 @@ class TestParseDate:
 
 class TestJurisdictionFromISIN:
     def test_us(self):
-        assert _jurisdiction_from_isin("US0258161092") == "US"
+        assert _jurisdiction_from_isin("US00SYNTH012") == "US"
 
     def test_de(self):
-        assert _jurisdiction_from_isin("DE000A0F5UF5") == "DE"
+        assert _jurisdiction_from_isin("DE00SYNTH008") == "DE"
 
     def test_ie(self):
-        assert _jurisdiction_from_isin("IE00BTJRMP35") == "IE"
+        assert _jurisdiction_from_isin("IE00SYNTH009") == "IE"
 
     def test_nl(self):
-        assert _jurisdiction_from_isin("NL0010273215") == "NL"
+        assert _jurisdiction_from_isin("NL00SYNTH005") == "NL"
 
     def test_lu(self):
-        assert _jurisdiction_from_isin("LU0274209740") == "LU"
+        assert _jurisdiction_from_isin("LU00SYNTH010") == "LU"
 
 
 # ── Line classifier tests ──────────────────────────────────────────────────────
@@ -82,29 +83,29 @@ class TestJurisdictionFromISIN:
 class TestIsTxStartLine:
     def test_kauf(self):
         assert _is_tx_start_line(
-            "05.06.2026 000000000000 Kauf 27 X(IE)-MSCIEM.MKTS1CDLFUNDS A12GVR EUR 78,18400 -2.117,87"  # noqa: E501
+            "05.06.2026 000000000000 Kauf 27 SYNTHETICETFIOTA SYN009 EUR 78,18400 -2.117,87"  # noqa: E501
         )
 
     def test_verkauf(self):
         assert _is_tx_start_line(
-            "05.06.2026 000000000000 Verkauf -25 ADVANCEDMICRODEVICESINC.RG.SH. 863186 EUR 415,20000 8.448,72"  # noqa: E501
+            "05.06.2026 000000000000 Verkauf -25 SYNTHETICEQUITYETA.RG.SH. SYN007 EUR 415,20000 8.448,72"  # noqa: E501
         )
 
     def test_dividend(self):
         assert _is_tx_start_line(
-            "01.06.2026 000000000000 Divid./Ausschütt. 20 VISAINC.REG.SHARESCLASSADL-,0001 A0NC7B USD 6,81"  # noqa: E501
+            "01.06.2026 000000000000 Divid./Ausschütt. 20 SYNTHETICEQUITYZETA.REG.SHARES SYN006 USD 6,81"  # noqa: E501
         )
 
     def test_kapitaltransaktion(self):
         assert _is_tx_start_line(
-            "10.06.2024 000000000000 Kapitaltransaktion 342 NVIDIACORP.REGISTEREDSHARES 918422 USD 0,00000 0,00"  # noqa: E501
+            "10.06.2024 000000000000 Kapitaltransaktion 342 SYNTHETICEQUITYDELTA SYN004 USD 0,00000 0,00"  # noqa: E501
         )
 
     def test_continuation_line_is_not_start(self):
         assert not _is_tx_start_line("DL-,01")
 
     def test_isin_line_is_not_start(self):
-        assert not _is_tx_start_line("09.06.2026 000000000000EUR US0079031078 EUR")
+        assert not _is_tx_start_line("09.06.2026 000000000000EUR US00SYNTH007 EUR")
 
     def test_header_is_not_start(self):
         assert not _is_tx_start_line("Umsätze vom 01.01.2024 bis 06.06.2026")
@@ -112,18 +113,18 @@ class TestIsTxStartLine:
 
 class TestHasISIN:
     def test_eur_isin_line(self):
-        assert _has_isin("09.06.2026 000000000000EUR US0079031078 EUR")
+        assert _has_isin("09.06.2026 000000000000EUR US00SYNTH007 EUR")
 
     def test_usd_isin_line_with_fx(self):
-        assert _has_isin("01.06.2026 000000000000USD US92826C8394 1,16980 EUR")
+        assert _has_isin("01.06.2026 000000000000USD US00SYNTH006 1,16980 EUR")
 
     def test_kapitaltransaktion_isin_line(self):
-        assert _has_isin("10.06.2024 US67066G1040 EUR")
+        assert _has_isin("10.06.2024 US00SYNTH004 EUR")
 
     def test_primary_line_has_no_isin(self):
         # WKN is 6 chars, not 12 — should not match
         assert not _has_isin(
-            "05.06.2026 000000000000 Kauf 27 X(IE)-MSCIEM.MKTS1CDLFUNDS A12GVR EUR 78,18400 -2.117,87"  # noqa: E501
+            "05.06.2026 000000000000 Kauf 27 SYNTHETICETFIOTA SYN009 EUR 78,18400 -2.117,87"  # noqa: E501
         )
 
 
@@ -132,23 +133,23 @@ class TestHasISIN:
 
 class TestParseISINLine:
     def test_eur_no_fx(self):
-        result = _parse_isin_line("09.06.2026 000000000000EUR US0079031078 EUR")
-        assert result["isin"] == "US0079031078"
+        result = _parse_isin_line("09.06.2026 000000000000EUR US00SYNTH007 EUR")
+        assert result["isin"] == "US00SYNTH007"
         assert result["fx_rate"] is None
 
     def test_usd_with_fx(self):
-        result = _parse_isin_line("01.06.2026 000000000000USD US92826C8394 1,16980 EUR")
-        assert result["isin"] == "US92826C8394"
+        result = _parse_isin_line("01.06.2026 000000000000USD US00SYNTH006 1,16980 EUR")
+        assert result["isin"] == "US00SYNTH006"
         assert result["fx_rate"] == pytest.approx(1.1698)
 
     def test_kapitaltransaktion_no_depot(self):
-        result = _parse_isin_line("10.06.2024 US67066G1040 EUR")
-        assert result["isin"] == "US67066G1040"
+        result = _parse_isin_line("10.06.2024 US00SYNTH004 EUR")
+        assert result["isin"] == "US00SYNTH004"
         assert result["fx_rate"] is None
 
     def test_nl_isin_no_fx(self):
-        result = _parse_isin_line("05.05.2026 000000000000EUR NL0010273215 EUR")
-        assert result["isin"] == "NL0010273215"
+        result = _parse_isin_line("05.05.2026 000000000000EUR NL00SYNTH005 EUR")
+        assert result["isin"] == "NL00SYNTH005"
         assert result["fx_rate"] is None
 
 
@@ -158,18 +159,18 @@ class TestParseISINLine:
 class TestParseTxBlock:
     def test_buy_no_wrap(self):
         block = [
-            "05.06.2026 000000000000 Kauf 27 X(IE)-MSCIEM.MKTS1CDLFUNDS A12GVR EUR 78,18400 -2.117,87",  # noqa: E501
-            "09.06.2026 000000000000EUR IE00BTJRMP35 EUR",
+            "05.06.2026 000000000000 Kauf 27 SYNTHETICETFIOTA SYN009 EUR 78,18400 -2.117,87",  # noqa: E501
+            "09.06.2026 000000000000EUR IE00SYNTH009 EUR",
         ]
         tx = _parse_tx_block(block)
         assert tx is not None
         assert tx["transaction_type"] == "buy"
         assert tx["quantity"] == pytest.approx(27.0)
-        assert tx["wkn"] == "A12GVR"
+        assert tx["wkn"] == "SYN009"
         assert tx["currency"] == "EUR"
         assert tx["price"] == pytest.approx(78.184)
         assert tx["amount"] == pytest.approx(2117.87)
-        assert tx["isin"] == "IE00BTJRMP35"
+        assert tx["isin"] == "IE00SYNTH009"
         assert tx["date"] == "2026-06-05"
         assert tx["jurisdiction"] == "IE"
         assert tx["fees"] == 0.0
@@ -177,25 +178,25 @@ class TestParseTxBlock:
 
     def test_sell_with_name_wrap(self):
         block = [
-            "05.06.2026 000000000000 Verkauf -25 ADVANCEDMICRODEVICESINC.RG.SH. 863186 EUR 415,20000 8.448,72",  # noqa: E501
+            "05.06.2026 000000000000 Verkauf -25 SYNTHETICEQUITYETA.RG.SH. SYN007 EUR 415,20000 8.448,72",  # noqa: E501
             "DL-,01",
-            "09.06.2026 000000000000EUR US0079031078 EUR",
+            "09.06.2026 000000000000EUR US00SYNTH007 EUR",
         ]
         tx = _parse_tx_block(block)
         assert tx is not None
         assert tx["transaction_type"] == "sell"
         assert tx["quantity"] == pytest.approx(25.0)  # abs value
-        assert tx["wkn"] == "863186"
+        assert tx["wkn"] == "SYN007"
         assert tx["price"] == pytest.approx(415.2)
         assert tx["amount"] == pytest.approx(8448.72)
-        assert tx["isin"] == "US0079031078"
-        assert "ADVANCEDMICRODEVICESINC" in tx["asset_name"]
+        assert tx["isin"] == "US00SYNTH007"
+        assert "SYNTHETICEQUITYETA" in tx["asset_name"]
         assert "DL-,01" in tx["asset_name"]
 
     def test_dividend_usd_with_fx(self):
         block = [
-            "01.06.2026 000000000000 Divid./Ausschütt. 20 VISAINC.REG.SHARESCLASSADL-,0001 A0NC7B USD 6,81",  # noqa: E501
-            "01.06.2026 000000000000USD US92826C8394 1,16980 EUR",
+            "01.06.2026 000000000000 Divid./Ausschütt. 20 SYNTHETICEQUITYZETA.REG.SHARES SYN006 USD 6,81",  # noqa: E501
+            "01.06.2026 000000000000USD US00SYNTH006 1,16980 EUR",
         ]
         tx = _parse_tx_block(block)
         assert tx is not None
@@ -204,51 +205,50 @@ class TestParseTxBlock:
         assert tx["currency"] == "USD"
         assert tx["amount"] == pytest.approx(6.81)
         assert tx["price"] == pytest.approx(0.0)
-        assert tx["isin"] == "US92826C8394"
+        assert tx["isin"] == "US00SYNTH006"
         assert tx["jurisdiction"] == "US"
 
     def test_dividend_eur_with_name_wrap(self):
         block = [
-            "05.05.2026 000000000000 Divid./Ausschütt. 22 ASMLHOLDINGN.V.AANDELENOPNAAM A1J4U4 EUR 44,23",  # noqa: E501
+            "05.05.2026 000000000000 Divid./Ausschütt. 22 SYNTHETICEQUITYEPSILON.NAAM SYN005 EUR 44,23",  # noqa: E501
             "EO-,09",
-            "05.05.2026 000000000000EUR NL0010273215 EUR",
+            "05.05.2026 000000000000EUR NL00SYNTH005 EUR",
         ]
         tx = _parse_tx_block(block)
         assert tx is not None
         assert tx["transaction_type"] == "dividend"
         assert tx["currency"] == "EUR"
         assert tx["amount"] == pytest.approx(44.23)
-        assert tx["isin"] == "NL0010273215"
-        assert "ASML" in tx["asset_name"]
+        assert tx["isin"] == "NL00SYNTH005"
+        assert "SYNTHETICEQUITYEPSILON" in tx["asset_name"]
 
     def test_kapitaltransaktion_raw_new_shares(self):
         """Kapitaltransaktion stores raw new_shares; ratio is derived later."""
         block = [
-            "10.06.2024 000000000000 Kapitaltransaktion 342 NVIDIACORP.REGISTEREDSHARES 918422 USD 0,00000 0,00",  # noqa: E501
+            "10.06.2024 000000000000 Kapitaltransaktion 342 SYNTHETICEQUITYDELTA SYN004 USD 0,00000 0,00",  # noqa: E501
             "DL-,001",
-            "10.06.2024 US67066G1040 EUR",
+            "10.06.2024 US00SYNTH004 EUR",
         ]
         tx = _parse_tx_block(block)
         assert tx is not None
         assert tx["transaction_type"] == "split"
-        assert tx["isin"] == "US67066G1040"
+        assert tx["isin"] == "US00SYNTH004"
         # Raw new_shares stored; ratio derivation is done by _derive_split_ratios
         assert tx["_new_shares"] == pytest.approx(342.0)
 
     def test_buy_large_amount(self):
         """Kauf with large EUR amount (iShares)."""
         primary = (
-            "06.02.2026 000000000000 Kauf 235 ISHARE.NASDAQ-100UCITSETFDE"
-            " A0F5UF EUR 203,20000 -47.758,90"
+            "06.02.2026 000000000000 Kauf 235 SYNTHETICETFTHETA SYN008 EUR 203,20000 -47.758,90"
         )
-        block = [primary, "INHABER-ANT.", "10.02.2026 000000000000EUR DE000A0F5UF5 EUR"]
+        block = [primary, "INHABER-ANT.", "10.02.2026 000000000000EUR DE00SYNTH008 EUR"]
         tx = _parse_tx_block(block)
         assert tx is not None
         assert tx["transaction_type"] == "buy"
         assert tx["quantity"] == pytest.approx(235.0)
         assert tx["price"] == pytest.approx(203.2)
         assert tx["amount"] == pytest.approx(47758.9)
-        assert tx["isin"] == "DE000A0F5UF5"
+        assert tx["isin"] == "DE00SYNTH008"
         assert tx["jurisdiction"] == "DE"
 
 
@@ -256,13 +256,13 @@ class TestParseTxBlock:
 
 
 class TestDeriveSplitRatios:
-    def test_nvidia_10_for_1(self):
-        """Simulate the Nvidia 10-for-1 split: 38 existing + 342 new = ratio 10."""
+    def test_synthetic_10_for_1(self):
+        """Simulate a 10-for-1 split: 38 existing + 342 new = ratio 10."""
         raw_txns = [
             # Buy 20 shares
             {
                 "date": "2024-01-02",
-                "isin": "US67066G1040",
+                "isin": "US00SYNTH004",
                 "transaction_type": "buy",
                 "quantity": 20.0,
                 "_new_shares": None,
@@ -270,7 +270,7 @@ class TestDeriveSplitRatios:
             # Buy 10 more
             {
                 "date": "2024-02-21",
-                "isin": "US67066G1040",
+                "isin": "US00SYNTH004",
                 "transaction_type": "buy",
                 "quantity": 10.0,
                 "_new_shares": None,
@@ -278,7 +278,7 @@ class TestDeriveSplitRatios:
             # Buy 8 more (total: 38)
             {
                 "date": "2024-05-23",
-                "isin": "US67066G1040",
+                "isin": "US00SYNTH004",
                 "transaction_type": "buy",
                 "quantity": 8.0,
                 "_new_shares": None,
@@ -286,7 +286,7 @@ class TestDeriveSplitRatios:
             # 10-for-1 split: new_shares = 342 = 38 * 9
             {
                 "date": "2024-06-10",
-                "isin": "US67066G1040",
+                "isin": "US00SYNTH004",
                 "transaction_type": "split",
                 "quantity": 0.0,  # placeholder
                 "_new_shares": 342.0,
@@ -322,7 +322,10 @@ class TestDeriveSplitRatios:
 # ── Integration tests (skipped if private PDF absent) ─────────────────────────
 
 
-@pytest.mark.skipif(not REAL_PDF.exists(), reason="Private PDF fixture not present")
+@pytest.mark.skipif(
+    REAL_PDF is None or not REAL_PDF.exists(),
+    reason="DB_PDF_TEST_PATH is not set to a private PDF fixture",
+)
 class TestRealPDF:
     @pytest.fixture(scope="class")
     def parsed(self):
@@ -361,14 +364,14 @@ class TestRealPDF:
         unknown = set(tx_df["transaction_type"].unique()) - ALL_TRANSACTION_TYPES
         assert unknown == set(), f"Unknown transaction types: {unknown}"
 
-    def test_nvidia_split_ratio_is_ten(self, parsed):
-        """Nvidia 10-for-1 split (2024-06-10) must have ratio=10 after derivation."""
+    def test_synthetic_split_ratio_is_ten(self, parsed):
+        """Synthetic 10-for-1 split row must have ratio=10 after derivation."""
         tx_df, _ = parsed
-        nvidia_splits = tx_df[
-            (tx_df["isin"] == "US67066G1040") & (tx_df["transaction_type"] == "split")
+        synthetic_splits = tx_df[
+            (tx_df["isin"] == "US00SYNTH004") & (tx_df["transaction_type"] == "split")
         ]
-        assert len(nvidia_splits) == 1, "Expected exactly one Nvidia split"
-        assert nvidia_splits.iloc[0]["quantity"] == pytest.approx(10.0)
+        assert len(synthetic_splits) == 1, "Expected exactly one synthetic split"
+        assert synthetic_splits.iloc[0]["quantity"] == pytest.approx(10.0)
 
     def test_all_isins_are_twelve_chars(self, parsed):
         tx_df, hld_df = parsed

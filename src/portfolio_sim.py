@@ -341,8 +341,8 @@ class YahooPriceProvider(PriceProvider):
     Fetches historical security prices from Yahoo Finance.
 
     Requires a user-supplied ISIN → Yahoo ticker mapping because Yahoo
-    uses ticker symbols, not ISINs.  For EUR-listed tickers (e.g. "EXXT.DE")
-    the price is returned directly in EUR. For non-EUR tickers (e.g. "AAPL"
+    uses ticker symbols, not ISINs.  For EUR-listed tickers (e.g. "SYNT.DE")
+    the price is returned directly in EUR. For non-EUR tickers (e.g. "SYNG"
     quoted in USD) the fx_provider converts to EUR using the same date.
 
     Uses a 7-day lookback window to handle weekends and holidays.
@@ -355,8 +355,8 @@ class YahooPriceProvider(PriceProvider):
     ) -> None:
         """
         isin_to_ticker: mapping of ISIN → Yahoo Finance ticker symbol.
-            EUR-listed examples : "EXXT.DE", "ASML.AS", "AXP.DE"
-            USD-listed examples : "AAPL", "MSFT", "NVDA"
+            EUR-listed examples : "SYNT.DE", "SYNE.AS", "SYNX.DE"
+            USD-listed examples : "SYNG", "SYNM", "SYND"
         fx_provider: used to convert non-EUR prices to EUR.
             Defaults to ECBProvider.
         """

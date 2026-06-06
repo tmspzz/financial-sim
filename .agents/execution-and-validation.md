@@ -27,16 +27,27 @@ docker run --rm -it \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
   -e PYTHONPATH=/home/jovyan/work/src \
-  quay.io/jupyter/scipy-notebook:latest \
+  financial-sim:latest \
   python
 ```
 
 Or write a temporary file to `scratch/` and run it in the container. The `scratch/` directory is ignored by version control and is safe to use as a throwaway workspace. Delete scratch files when done — do not commit them.
 
-The Docker image is:
+The project Docker image is:
 
 ```text
-quay.io/jupyter/scipy-notebook:latest
+financial-sim:latest
+```
+
+It is built from `quay.io/jupyter/scipy-notebook:latest` and installs
+`requirements-dev.txt`. The Docker environment must always work for notebooks,
+scripts, tests, PDF parsing, and Parquet I/O without manual `pip install`
+commands inside Jupyter.
+
+Build or rebuild it after dependency changes:
+
+```bash
+docker compose build
 ```
 
 The Compose service bind-mounts the project into:
@@ -79,8 +90,8 @@ docker run --rm \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
   -e PYTHONPATH=/home/jovyan/work/src \
-  quay.io/jupyter/scipy-notebook:latest \
-  sh -lc "python -m pip install --quiet -r requirements-dev.txt && pytest -q"
+  financial-sim:latest \
+  sh -lc "pytest -q"
 ```
 
 ## Formatting And Linting
@@ -93,8 +104,8 @@ Run after every Python change:
 docker run --rm \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
-  quay.io/jupyter/scipy-notebook:latest \
-  sh -lc "python -m pip install --quiet -r requirements-dev.txt && ruff format src scripts tests && ruff check src scripts tests"
+  financial-sim:latest \
+  sh -lc "ruff format src scripts tests && ruff check src scripts tests"
 ```
 
 Before finishing, run the full quality command:
@@ -104,8 +115,8 @@ docker run --rm \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
   -e PYTHONPATH=/home/jovyan/work/src \
-  quay.io/jupyter/scipy-notebook:latest \
-  sh -lc "python -m pip install --quiet -r requirements-dev.txt && pytest -q && ruff format --check src scripts tests && ruff check src scripts tests"
+  financial-sim:latest \
+  sh -lc "pytest -q && ruff format --check src scripts tests && ruff check src scripts tests"
 ```
 
 ## Notebook Execution
@@ -118,7 +129,7 @@ Example:
 docker run --rm \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
-  quay.io/jupyter/scipy-notebook:latest \
+  financial-sim:latest \
   jupyter nbconvert --to notebook --execute notebooks/04_stop_reentry_vs_hold.ipynb \
   --output ../executed/04_stop_reentry_vs_hold.executed.ipynb \
   --ExecutePreprocessor.timeout=180
@@ -130,7 +141,7 @@ Run the summary script:
 docker run --rm \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
-  quay.io/jupyter/scipy-notebook:latest \
+  financial-sim:latest \
   python scripts/summarize_results.py
 ```
 
@@ -145,7 +156,11 @@ executed/results_summary.txt
 Validate notebooks as JSON:
 
 ```bash
-python3 - <<'PY'
+docker run --rm \
+  -v "$PWD":/home/jovyan/work \
+  -w /home/jovyan/work \
+  financial-sim:latest \
+  python - <<'PY'
 import json
 from pathlib import Path
 for path in sorted(Path("notebooks").glob("*.ipynb")):
@@ -157,7 +172,11 @@ PY
 Compile notebook code cells without executing imports:
 
 ```bash
-python3 - <<'PY'
+docker run --rm \
+  -v "$PWD":/home/jovyan/work \
+  -w /home/jovyan/work \
+  financial-sim:latest \
+  python - <<'PY'
 import json
 from pathlib import Path
 for path in sorted(Path("notebooks").glob("*.ipynb")):
@@ -174,5 +193,10 @@ PY
 Validate shared Python:
 
 ```bash
-python3 -m py_compile src/tax_risk_sim.py
+docker run --rm \
+  -v "$PWD":/home/jovyan/work \
+  -w /home/jovyan/work \
+  -e PYTHONPATH=/home/jovyan/work/src \
+  financial-sim:latest \
+  python -m py_compile src/tax_risk_sim.py src/portfolio_sim.py src/pdf_parser.py
 ```

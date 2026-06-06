@@ -56,11 +56,16 @@ else
     fi
 fi
 
-# ── 4. Pull the Docker image ──────────────────────────────────────────────────
+# ── 4. Build the project Docker image ─────────────────────────────────────────
 echo ""
-echo "Pulling the project Docker image (this is slow once, fast after)..."
+echo "Pulling the base Docker image (this is slow once, fast after)..."
 docker pull quay.io/jupyter/scipy-notebook:latest
-ok "Docker image ready"
+ok "Base Docker image ready"
+
+echo ""
+echo "Building the project Docker image with Python dependencies..."
+docker compose build jupyter
+ok "Project Docker image ready"
 
 # ── 5. Smoke test ─────────────────────────────────────────────────────────────
 echo ""
@@ -69,8 +74,8 @@ docker run --rm \
   -v "$PWD":/home/jovyan/work \
   -w /home/jovyan/work \
   -e PYTHONPATH=/home/jovyan/work/src \
-  quay.io/jupyter/scipy-notebook:latest \
-  sh -lc "python -m pip install --quiet -r requirements-dev.txt && pytest -q && ruff format --check src scripts tests && ruff check src scripts tests"
+  financial-sim:latest \
+  sh -lc "pytest -q && ruff format --check src scripts tests && ruff check src scripts tests"
 ok "All checks pass"
 
 echo ""

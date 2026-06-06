@@ -8,15 +8,15 @@ review) and a Parquet file (for notebooks and simulation).
 
 Usage:
     python scripts/normalize_portfolio_inputs.py \\
-        --input data/private/my_transactions.csv \\
-        --output-csv data/private/normalized_transactions.csv \\
-        --output-parquet data/private/normalized_transactions.parquet \\
+        --input /path/to/my_transactions.csv \\
+        --output-csv /path/to/normalized_transactions.csv \\
+        --output-parquet /path/to/normalized_transactions.parquet \\
         --type transactions
 
     python scripts/normalize_portfolio_inputs.py \\
-        --input data/private/my_holdings.csv \\
-        --output-csv data/private/normalized_holdings.csv \\
-        --output-parquet data/private/normalized_holdings.parquet \\
+        --input /path/to/my_holdings.csv \\
+        --output-csv /path/to/normalized_holdings.csv \\
+        --output-parquet /path/to/normalized_holdings.parquet \\
         --type holdings
 
 Real input data must live under data/private/ which is gitignored.

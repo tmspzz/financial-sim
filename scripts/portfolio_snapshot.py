@@ -8,13 +8,15 @@ a simulation report with unrealised gains and YTD realised gains.
 
 Usage (inside Docker):
     python scripts/portfolio_snapshot.py \\
-        --pdf data/private/report.pdf \\
-        --ticker-map data/ticker_map.json \\
+        --pdf /path/to/deutsche-bank-report.pdf \\
+        --ticker-map data/private/ticker_map.json \\
         --tax-rate 0.26375
 
 ticker-map is a JSON object mapping ISIN → Yahoo Finance ticker symbol, e.g.:
-    { "US67066G1040": "NVDA", "DE0005140008": "DBK.DE" }
+    { "US00SYNTH004": "SYND", "DE00SYNTH001": "SYNA.DE" }
 
+Use `data/private/ticker_map.json` for your real local map; it is gitignored. The
+committed synthetic example is `data/examples/ticker_map_synthetic.json`.
 ISINs without a ticker mapping are reported but excluded from live pricing.
 """
 

@@ -11,7 +11,7 @@ Requires pdfplumber (not the host Python — run inside Docker):
 
 Usage:
     from pdf_parser import parse_db_pdf
-    tx_df, hld_df = parse_db_pdf("data/private/report.pdf")
+    tx_df, hld_df = parse_db_pdf("/path/to/deutsche-bank-report.pdf")
 
 See also: scripts/parse_db_pdf.py for the CLI wrapper.
 """
@@ -282,7 +282,7 @@ def _derive_split_ratios(raw_txns: list[dict[str, Any]]) -> list[dict[str, Any]]
     Post-process raw transaction records to replace new_shares with split ratio.
 
     The Deutsche Bank PDF stores the number of new shares added by a split
-    (e.g. 342 for Nvidia's 10-for-1 on 38 existing shares). This function
+    (e.g. 342 new shares for a 10-for-1 split on 38 existing shares). This function
     replays the transaction stream chronologically, tracks running share
     counts per ISIN, and computes ratio = (existing + new) / existing.
 

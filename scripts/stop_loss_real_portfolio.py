@@ -15,16 +15,19 @@ bear market and recovery.
 
 Usage (inside Docker):
     python scripts/stop_loss_real_portfolio.py \\
-        --pdf data/private/report.pdf \\
-        --ticker-map data/ticker_map.json \\
+        --pdf /path/to/deutsche-bank-report.pdf \\
+        --ticker-map data/private/ticker_map.json \\
         --tax-rate 0.26375 \\
         --stop-drops 0.05,0.10,0.15,0.20,0.25,0.30
 
     # Offline with pre-fetched prices:
     python scripts/stop_loss_real_portfolio.py \\
-        --pdf data/private/report.pdf \\
-        --static-prices data/private/prices.json \\
+        --pdf /path/to/deutsche-bank-report.pdf \\
+        --static-prices /path/to/prices.json \\
         --tax-rate 0.26375
+
+Use `data/private/ticker_map.json` for your real local map; it is gitignored. The
+committed synthetic example is `data/examples/ticker_map_synthetic.json`.
 """
 
 from __future__ import annotations

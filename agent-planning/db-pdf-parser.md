@@ -1,6 +1,6 @@
 # Plan: Deutsche Bank PDF Parser
 
-## Document structure (report.pdf, 22 pages)
+## Document structure (private Deutsche Bank report sample, 22 pages)
 
 | Pages | Section | Content |
 |-------|---------|---------|
@@ -17,7 +17,7 @@ Each transaction spans 2–3 text lines. pdfplumber finds no tables — text-onl
 
 **Primary line** (always):
 ```
-DD.MM.YYYY 000000000000 <Umsatzart> <qty> <name_fragment> <WKN> <CCY> [<price>] <amount>
+DD.MM.YYYY <depot> <Umsatzart> <qty> <name_fragment> <WKN> <CCY> [<price>] <amount>
 ```
 
 **Continuation line(s)** (when name wraps — observed for ~40% of rows):
@@ -26,8 +26,8 @@ DD.MM.YYYY 000000000000 <Umsatzart> <qty> <name_fragment> <WKN> <CCY> [<price>] 
 ```
 
 **ISIN line** (always, terminates the block):
-- EUR security: `DD.MM.YYYY 000000000000EUR <ISIN> EUR`
-- Foreign CCY:  `DD.MM.YYYY 000000000000USD <ISIN> <fx_rate> EUR`
+- EUR security: `DD.MM.YYYY <depot>EUR <ISIN> EUR`
+- Foreign CCY:  `DD.MM.YYYY <depot>USD <ISIN> <fx_rate> EUR`
 - Kapitaltransaktion (no depot prefix): `DD.MM.YYYY <ISIN> EUR`
 
 ### Transaction types observed
@@ -37,7 +37,7 @@ DD.MM.YYYY 000000000000 <Umsatzart> <qty> <name_fragment> <WKN> <CCY> [<price>] 
 | Kauf | buy | ~25 |
 | Verkauf | sell | ~10 |
 | Divid./Ausschütt. | dividend | ~60 |
-| Kapitaltransaktion | split | 1 (Nvidia 10-for-1, 2024-06-10) |
+| Kapitaltransaktion | split | 1 synthetic 10-for-1 split |
 
 ### Trailing token layout (parsed right-to-left)
 
@@ -50,7 +50,7 @@ Price and amount use German decimal format: `8.448,72` → 8448.72.
 
 ### Split ratio derivation
 
-The PDF stores `new_shares_added` (342 for Nvidia), not the split ratio.
+The PDF stores `new_shares_added` (for example, 342), not the split ratio.
 The parser performs a single post-processing pass — tracking running share
 counts from buy/sell rows — to derive `ratio = (existing + new) / existing`
 before emitting the split row. This ensures the output can be fed directly to
@@ -79,13 +79,13 @@ initialisation or cross-check).
 
 ## Module boundaries
 
-- `src/pdf_parser.py` — new; depends on `pdfplumber` (not in requirements-dev.txt today)
+- `src/pdf_parser.py` — depends on `pdfplumber`
 - `src/portfolio_sim.py` — unchanged
-- `scripts/parse_db_pdf.py` — new CLI: `--input PDF --output-dir DIR`
-- `tests/test_pdf_parser.py` — new; unit tests use text fixtures (no PDF);
-  integration tests skip if `data/private/*.pdf` absent
+- `scripts/parse_db_pdf.py` — CLI: `--input PDF --output-dir DIR`
+- `tests/test_pdf_parser.py` — unit tests use text fixtures (no PDF);
+  integration tests use `DB_PDF_TEST_PATH` when explicitly provided
 
-## Files to create
+## Files created
 
 ```
 src/pdf_parser.py
@@ -93,25 +93,38 @@ scripts/parse_db_pdf.py
 tests/test_pdf_parser.py
 ```
 
-## Files to modify
+## Files modified
 
 ```
 requirements-dev.txt           — add pdfplumber
 .github/workflows/ci.yml       — add pdfplumber to pip install
 ```
 
+## Implementation status
+
+Implemented in:
+
+```text
+src/pdf_parser.py
+scripts/parse_db_pdf.py
+tests/test_pdf_parser.py
+```
+
+Integration tests use `DB_PDF_TEST_PATH` when set and skip when no private PDF
+path is provided.
+
 ## Slices (TDD)
 
-- [ ] helper functions: _parse_german_number, _parse_date, _jurisdiction_from_isin
-- [ ] primary-line tokeniser: _parse_primary_line (buy/sell/dividend/split)
-- [ ] ISIN-line parser: _parse_isin_line
-- [ ] block collector and block parser: _parse_tx_block
-- [ ] split ratio post-processing: _derive_split_ratios
-- [ ] page classifier: identify Umsätze vs Einstandskursen pages
-- [ ] holdings block parser: _parse_holdings_block
-- [ ] top-level: parse_db_pdf -> (tx_df, holdings_df)
-- [ ] integration test: real PDF produces valid DataFrames (skipped in CI)
-- [ ] CLI script: scripts/parse_db_pdf.py
+- [x] helper functions: _parse_german_number, _parse_date, _jurisdiction_from_isin
+- [x] primary-line tokeniser: _parse_primary_line (buy/sell/dividend/split)
+- [x] ISIN-line parser: _parse_isin_line
+- [x] block collector and block parser: _parse_tx_block
+- [x] split ratio post-processing: _derive_split_ratios
+- [x] page classifier: identify Umsätze vs Einstandskursen pages
+- [x] holdings block parser: _parse_holdings_block
+- [x] top-level: parse_db_pdf -> (tx_df, holdings_df)
+- [x] integration test: private PDF produces valid DataFrames (skipped in CI)
+- [x] CLI script: scripts/parse_db_pdf.py
 
 ## Known limitations (v1)
 

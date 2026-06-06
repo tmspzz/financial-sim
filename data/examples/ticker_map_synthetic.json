@@ -1,0 +1,17 @@
+{
+  "_comment": "ISIN → Yahoo Finance ticker. US stocks return USD (ECB FX converts to EUR). ETFs with .DE suffix return EUR directly.",
+  "NL00SYNTH011": "SYNS",
+  "US00SYNTH012": "SYNX",
+  "US00SYNTH013": "SYNK",
+  "US00SYNTH014": "SYNI",
+  "US00SYNTH003": "SYNG",
+  "US00SYNTH015": "SYNM",
+  "US00SYNTH016": "SYNN",
+  "US00SYNTH004": "SYND",
+  "DE00SYNTH008": "SYNT.DE",
+  "US00SYNTH006": "SYNV",
+  "US00SYNTH017": "SYNO",
+  "US00SYNTH018": "SYNP",
+  "LU00SYNTH010": "SYNJ.DE",
+  "IE00SYNTH009": "SYNE.DE"
+}
