@@ -77,6 +77,11 @@ http://localhost:8888/lab
 
 Use `pytest`.
 
+**Write the failing test before the fix.** This is mandatory for every change
+to `src/`. See `.agents/python-project-conventions.md` Step 1 for the full
+protocol. Never write a fix, then add tests only when asked — that sequence
+proved incorrect for the ISIN false-positive parser bug.
+
 Tests should cover:
 
 - tax calculation
@@ -87,8 +92,9 @@ Tests should cover:
 - stop + re-entry share rounding
 - leftover cash
 - probability validation
+- parser line classification (use raw text from actual PDF, not invented data)
 
-Run tests after every calculation change:
+Run tests after every change to `src/`:
 
 ```bash
 docker run --rm \

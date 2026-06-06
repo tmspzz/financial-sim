@@ -129,15 +129,37 @@ After round three, either:
 
 See `.agents/specialist-personas.md` for the full council protocol and persona definitions.
 
-### Step 1 — Use TDD for calculation changes
+### Step 1 — Use TDD for all src/ changes
+
+**Test first. No exceptions.**
+
+This applies to every change in `src/` — bug fixes, parser changes, new
+functions, refactors. Not just "calculation changes". If you are tempted to
+write the code first and add tests afterward, that is the wrong order.
 
 ```text
-1. Write or update a failing test.
-2. Implement the smallest calculation change.
-3. Run tests.
-4. Run formatting and linting.
-5. Execute affected notebooks if notebook outputs changed.
+1. Write a failing test that captures the bug or new behaviour.
+2. Run it — confirm it fails for the right reason.
+3. Implement the smallest change that makes it pass.
+4. Run all tests.
+5. Run formatting and linting.
+6. Execute affected notebooks if notebook outputs changed.
 ```
+
+The test and the fix must appear in the same commit, or the test commit
+must come first. Never commit a fix without a test. Never add tests only
+when asked — tests are part of the definition of done, not a follow-up task.
+
+**Why:** A fix without a prior failing test cannot prove the fix is correct.
+A test written after the fix is likely written to pass, not to catch the
+bug. And skipping this step was the root cause of the false-positive ISIN
+regression going undetected: the fix was implemented without a test, and
+the test only appeared when the user explicitly asked for it.
+
+**For parser or data-pipeline bugs specifically:** write a fixture using raw
+text lines extracted from the actual PDF (via `pdfplumber` in a scratch
+container), not invented data. Invented fixtures may not trigger the real
+failure mode.
 
 ### Step 2 — Commit using Conventional Commits
 
