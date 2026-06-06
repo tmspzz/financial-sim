@@ -562,6 +562,29 @@ def lots_to_dataframe(lots: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(lots)[LOT_COLUMNS]
 
 
+def fill_missing_prices_from_holdings(
+    prices_eur: dict[str, float],
+    hld_df: pd.DataFrame,
+) -> dict[str, float]:
+    """Return a copy of prices_eur with broker-implied prices added for missing ISINs.
+
+    For each ISIN in hld_df absent from prices_eur, the implied price is
+    market_value / quantity (the broker's reported current price). Positions with
+    zero quantity are skipped. Existing prices are never overwritten — live prices
+    always take precedence over broker-reported prices.
+    """
+    result = dict(prices_eur)
+    for _, row in hld_df.iterrows():
+        isin = row["isin"]
+        if isin in result:
+            continue
+        qty = float(row["quantity"])
+        if qty == 0.0:
+            continue
+        result[isin] = float(row["market_value"]) / qty
+    return result
+
+
 def initialize_lots_from_holdings(hld_df: pd.DataFrame) -> pd.DataFrame:
     """
     Seed the lot ledger from a holdings DataFrame that includes cost_basis_eur.

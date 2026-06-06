@@ -24,6 +24,7 @@ from portfolio_sim import (
     check_unsupported_actions,
     derive_holdings_from_lots,
     fetch_current_prices,
+    fill_missing_prices_from_holdings,
     initialize_lots_from_holdings,
     lots_to_dataframe,
     make_fx_provider,
@@ -936,3 +937,63 @@ class TestSimulateFromSnapshot:
         )
         dbk = result[result["isin"] == _SYN_ALPHA]
         assert len(dbk) == 0  # ISINs absent from prices and with no realised gain are omitted
+
+
+# ── fill_missing_prices_from_holdings ─────────────────────────────────────────
+
+
+def _hld_df(rows: list[dict]) -> pd.DataFrame:
+    """Build a minimal holdings DataFrame for fill_missing_prices tests."""
+    defaults = {
+        "date": "2026-06-06",
+        "wkn": "SYN000",
+        "asset_name": "Synthetic",
+        "currency": "EUR",
+        "jurisdiction": "DE",
+        "cost_basis_eur": 100.0,
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestFillMissingPricesFromHoldings:
+    def test_missing_isin_gets_implied_price(self):
+        hld = _hld_df(
+            [{"isin": "DE00SYNTH001", "quantity": 10.0, "price": 50.0, "market_value": 500.0}]
+        )
+        result = fill_missing_prices_from_holdings({}, hld)
+        assert result["DE00SYNTH001"] == pytest.approx(50.0)
+
+    def test_existing_price_not_overwritten(self):
+        hld = _hld_df(
+            [{"isin": "DE00SYNTH001", "quantity": 10.0, "price": 50.0, "market_value": 500.0}]
+        )
+        result = fill_missing_prices_from_holdings({"DE00SYNTH001": 99.0}, hld)
+        assert result["DE00SYNTH001"] == pytest.approx(99.0)
+
+    def test_zero_quantity_row_skipped(self):
+        hld = _hld_df(
+            [{"isin": "DE00SYNTH001", "quantity": 0.0, "price": 0.0, "market_value": 0.0}]
+        )
+        result = fill_missing_prices_from_holdings({}, hld)
+        assert "DE00SYNTH001" not in result
+
+    def test_mixed_known_and_unknown(self):
+        hld = _hld_df(
+            [
+                {"isin": "DE00SYNTH001", "quantity": 20.0, "price": 10.0, "market_value": 200.0},
+                {"isin": "US00SYNTH002", "quantity": 5.0, "price": 40.0, "market_value": 200.0},
+            ]
+        )
+        prices = {"DE00SYNTH001": 12.0}
+        result = fill_missing_prices_from_holdings(prices, hld)
+        assert result["DE00SYNTH001"] == pytest.approx(12.0)  # live price kept
+        assert result["US00SYNTH002"] == pytest.approx(40.0)  # broker price filled
+
+    def test_returns_new_dict_not_mutated(self):
+        hld = _hld_df(
+            [{"isin": "DE00SYNTH001", "quantity": 10.0, "price": 50.0, "market_value": 500.0}]
+        )
+        original = {}
+        result = fill_missing_prices_from_holdings(original, hld)
+        assert original == {}
+        assert "DE00SYNTH001" in result
