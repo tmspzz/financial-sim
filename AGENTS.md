@@ -121,10 +121,29 @@ scripts/stop_loss_real_portfolio.py
 Data:
 
 ```text
-data/private/     ← gitignored real broker PDFs, CSVs, Parquet, price files
-data/private/ticker_map.json ← gitignored real ISIN-to-ticker map for local simulations
-data/examples/    ← committed synthetic examples only
-tests/fixtures/   ← committed synthetic parser/model fixtures only
+data/private/        ← gitignored real broker PDFs, CSVs, Parquet, price files
+data/ticker_map.json ← committed ISIN→Yahoo ticker map (no prices; safe to commit)
+data/examples/       ← committed synthetic examples only
+tests/fixtures/      ← committed synthetic parser/model fixtures only
+```
+
+Docker image — always use `financial-sim:latest`; **never** `quay.io/jupyter/scipy-notebook:latest`
+directly (that base image lacks pdfplumber and other project dependencies):
+
+```bash
+# Start JupyterLab
+docker compose up
+
+# Run one-off commands
+docker run --rm \
+  -v "$PWD":/home/jovyan/work \
+  -w /home/jovyan/work \
+  -e PYTHONPATH=/home/jovyan/work/src \
+  financial-sim:latest \
+  <command>
+
+# Rebuild after dependency changes
+docker compose build
 ```
 
 Previous exploratory notebooks:

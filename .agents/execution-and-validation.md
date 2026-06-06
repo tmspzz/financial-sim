@@ -40,11 +40,15 @@ financial-sim:latest
 ```
 
 It is built from `quay.io/jupyter/scipy-notebook:latest` and installs
-`requirements-dev.txt`. The Docker environment must always work for notebooks,
-scripts, tests, PDF parsing, and Parquet I/O without manual `pip install`
-commands inside Jupyter.
+`requirements-dev.txt` (including pdfplumber, requests, pyarrow, ruff, pytest).
+The Docker environment must always work for notebooks, scripts, tests, PDF
+parsing, and Parquet I/O without manual `pip install` commands inside Jupyter.
 
-Build or rebuild it after dependency changes:
+**Never start a container or run commands using `quay.io/jupyter/scipy-notebook:latest`
+directly.** That base image lacks pdfplumber and other project dependencies.
+Always use `financial-sim:latest`.
+
+Build or rebuild it after `requirements-dev.txt` changes:
 
 ```bash
 docker compose build
@@ -60,6 +64,7 @@ Start JupyterLab:
 
 ```bash
 docker compose up
+# → http://localhost:8888/lab
 ```
 
 Open:
