@@ -13,15 +13,20 @@ from portfolio_sim import (
     SIMULATION_OUTPUT_COLUMNS,
     TRANSACTION_COLUMNS,
     ECBProvider,
+    PriceProvider,
+    StaticPriceProvider,
     UnsupportedCorporateAction,
+    YahooPriceProvider,
     YahooProvider,
     apply_buy,
     apply_sell_fifo,
     apply_split,
     check_unsupported_actions,
     derive_holdings_from_lots,
+    fetch_current_prices,
     lots_to_dataframe,
     make_fx_provider,
+    make_price_provider,
     reconcile_holdings,
     simulate_portfolio,
     simulate_portfolio_partial,
@@ -577,3 +582,123 @@ class TestUnsupportedActions:
         )
         assert excluded == []
         assert len(result) == 1
+
+
+# ── Price provider tests ───────────────────────────────────────────────────────
+
+
+class TestStaticPriceProvider:
+    def test_returns_configured_price(self):
+        p = StaticPriceProvider({"US0378331005": 221.36})
+        assert p.price_eur("US0378331005", "2026-06-06") == pytest.approx(221.36)
+
+    def test_missing_isin_raises_key_error(self):
+        p = StaticPriceProvider({})
+        with pytest.raises(KeyError):
+            p.price_eur("US0378331005", "2026-06-06")
+
+    def test_multiple_isins(self):
+        prices = {"US0378331005": 221.36, "NL0010273215": 1417.40}
+        p = StaticPriceProvider(prices)
+        assert p.price_eur("NL0010273215", "2026-06-06") == pytest.approx(1417.40)
+
+    def test_is_price_provider(self):
+        from portfolio_sim import PriceProvider
+
+        assert isinstance(StaticPriceProvider({}), PriceProvider)
+
+
+class TestYahooPriceProvider:
+    def _make_yahoo_response(
+        self, close: float, currency: str = "USD", date: str = "2026-06-06"
+    ) -> dict:
+        """Build a minimal Yahoo Finance chart API response.
+
+        Timestamps are anchored to noon UTC on the given date so they fall
+        within the target_ts window regardless of when the test runs.
+        """
+        from datetime import datetime, timedelta
+
+        # Use noon UTC two days and one day before `date` so both timestamps
+        # fall below target_ts (midnight of `date`) regardless of timezone.
+        dt = datetime.strptime(date, "%Y-%m-%d")
+        ts1 = int((dt - timedelta(days=2)).replace(hour=12).timestamp())
+        ts2 = int((dt - timedelta(days=1)).replace(hour=12).timestamp())
+        return {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {"currency": currency},
+                        "timestamp": [ts1, ts2],
+                        "indicators": {"quote": [{"close": [close - 1.0, close]}]},
+                    }
+                ]
+            }
+        }
+
+    def test_eur_ticker_no_fx_conversion(self):
+        """EUR-quoted ticker should be returned as-is (no FX conversion needed)."""
+        fx = _eur_fx()
+        provider = YahooPriceProvider({"DE000A0F5UF5": "EXXT.DE"}, fx_provider=fx)
+        resp = MagicMock()
+        resp.json.return_value = self._make_yahoo_response(199.43, currency="EUR")
+        with patch("requests.get", return_value=resp):
+            price = provider.price_eur("DE000A0F5UF5", "2026-06-06")
+        assert price == pytest.approx(199.43)
+
+    def test_usd_ticker_converted_to_eur(self):
+        """USD-quoted ticker should be converted to EUR via fx_provider."""
+        mock_fx = MagicMock(spec=PriceProvider)
+        mock_fx.convert = MagicMock(return_value=200.0)
+
+        fx_prov = MagicMock()
+        fx_prov.convert = MagicMock(return_value=200.0)
+
+        provider = YahooPriceProvider({"US0378331005": "AAPL"}, fx_provider=fx_prov)
+        resp = MagicMock()
+        resp.json.return_value = self._make_yahoo_response(220.0, currency="USD")
+        with patch("requests.get", return_value=resp):
+            price = provider.price_eur("US0378331005", "2026-06-06")
+        fx_prov.convert.assert_called_once_with(220.0, "USD", "EUR", "2026-06-06")
+        assert price == pytest.approx(200.0)
+
+    def test_missing_isin_raises_key_error(self):
+        provider = YahooPriceProvider({}, fx_provider=_eur_fx())
+        with pytest.raises(KeyError, match="No ticker mapping"):
+            provider.price_eur("US0378331005", "2026-06-06")
+
+
+class TestFetchCurrentPrices:
+    def test_returns_prices_for_known_isins(self):
+        provider = StaticPriceProvider({"US0378331005": 221.36, "NL0010273215": 1417.40})
+        result = fetch_current_prices(["US0378331005", "NL0010273215"], provider, "2026-06-06")
+        assert result == {
+            "US0378331005": pytest.approx(221.36),
+            "NL0010273215": pytest.approx(1417.40),
+        }
+
+    def test_skips_unknown_isins_silently(self):
+        provider = StaticPriceProvider({"US0378331005": 221.36})
+        result = fetch_current_prices(["US0378331005", "UNKNOWN_ISIN"], provider, "2026-06-06")
+        assert "US0378331005" in result
+        assert "UNKNOWN_ISIN" not in result
+
+    def test_empty_isin_list_returns_empty_dict(self):
+        provider = StaticPriceProvider({})
+        result = fetch_current_prices([], provider, "2026-06-06")
+        assert result == {}
+
+
+class TestMakePriceProvider:
+    def test_static_factory(self):
+        p = make_price_provider("static", prices={"US0378331005": 221.36})
+        assert isinstance(p, StaticPriceProvider)
+        assert p.price_eur("US0378331005", "2026-06-06") == pytest.approx(221.36)
+
+    def test_yahoo_factory(self):
+        p = make_price_provider("yahoo", isin_to_ticker={"US0378331005": "AAPL"})
+        assert isinstance(p, YahooPriceProvider)
+
+    def test_unknown_name_raises(self):
+        with pytest.raises(ValueError, match="Unknown price provider"):
+            make_price_provider("bloomberg")

@@ -12,6 +12,7 @@ consumers. Do not import from tax_risk_sim.py or inputs.py.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 from abc import ABC, abstractmethod
@@ -290,6 +291,156 @@ def make_fx_provider(name: str = "ecb") -> FXProvider:
     if name == "yahoo":
         return YahooProvider()
     raise ValueError(f"Unknown FX provider: {name!r}. Use 'ecb' or 'yahoo'.")
+
+
+# ── Price providers ────────────────────────────────────────────────────────────
+
+
+class PriceProvider(ABC):
+    """
+    Abstract interface for security price providers.
+
+    All implementations return prices in EUR so they can be fed directly
+    into simulate_portfolio() as current_prices_eur.
+    """
+
+    @abstractmethod
+    def price_eur(self, isin: str, date: str) -> float:
+        """
+        Return the closing price in EUR on or before the given date.
+
+        date: ISO 8601 string (YYYY-MM-DD).
+        Raises KeyError if the ISIN is not known to this provider.
+        Raises ValueError if no price is available on or before the date.
+        """
+
+
+class StaticPriceProvider(PriceProvider):
+    """
+    Fixed-price provider for demos, backtests, and offline testing.
+
+    Prices are constant regardless of the requested date — suitable when
+    you already have a snapshot of end-of-period prices (e.g. from a
+    broker holdings report).
+    """
+
+    def __init__(self, prices: dict[str, float]) -> None:
+        """
+        prices: mapping of ISIN → price in EUR.
+        """
+        self._prices = dict(prices)
+
+    def price_eur(self, isin: str, date: str) -> float:
+        if isin not in self._prices:
+            raise KeyError(f"No price configured for ISIN {isin!r}")
+        return self._prices[isin]
+
+
+class YahooPriceProvider(PriceProvider):
+    """
+    Fetches historical security prices from Yahoo Finance.
+
+    Requires a user-supplied ISIN → Yahoo ticker mapping because Yahoo
+    uses ticker symbols, not ISINs.  For EUR-listed tickers (e.g. "EXXT.DE")
+    the price is returned directly in EUR. For non-EUR tickers (e.g. "AAPL"
+    quoted in USD) the fx_provider converts to EUR using the same date.
+
+    Uses a 7-day lookback window to handle weekends and holidays.
+    """
+
+    def __init__(
+        self,
+        isin_to_ticker: dict[str, str],
+        fx_provider: FXProvider | None = None,
+    ) -> None:
+        """
+        isin_to_ticker: mapping of ISIN → Yahoo Finance ticker symbol.
+            EUR-listed examples : "EXXT.DE", "ASML.AS", "AXP.DE"
+            USD-listed examples : "AAPL", "MSFT", "NVDA"
+        fx_provider: used to convert non-EUR prices to EUR.
+            Defaults to ECBProvider.
+        """
+        self._map = dict(isin_to_ticker)
+        self._fx = fx_provider if fx_provider is not None else ECBProvider()
+
+    def price_eur(self, isin: str, date: str) -> float:
+        ticker = self._map.get(isin)
+        if not ticker:
+            raise KeyError(f"No ticker mapping for ISIN {isin!r}")
+        price, currency = self._fetch(ticker, date)
+        return self._fx.convert(price, currency, "EUR", date)
+
+    def _fetch(self, ticker: str, date: str) -> tuple[float, str]:
+        """Return (price, currency) for the ticker on or before date."""
+        from datetime import datetime, timedelta
+
+        dt = datetime.strptime(date, "%Y-%m-%d")
+        period1 = int((dt - timedelta(days=7)).timestamp())
+        period2 = int((dt + timedelta(days=1)).timestamp())
+
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            f"?interval=1d&period1={period1}&period2={period2}"
+        )
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+
+        data = resp.json()
+        result = data["chart"]["result"][0]
+        currency: str = result["meta"]["currency"]
+        timestamps: list[int] = result["timestamp"]
+        closes: list[float | None] = result["indicators"]["quote"][0]["close"]
+
+        target_ts = int(dt.timestamp())
+        pairs = [
+            (ts, c)
+            for ts, c in zip(timestamps, closes, strict=False)
+            if c is not None and ts <= target_ts
+        ]
+        if not pairs:
+            raise ValueError(f"No Yahoo price found for {ticker!r} on or before {date}")
+
+        _, price = max(pairs, key=lambda p: p[0])
+        return price, currency
+
+
+def make_price_provider(name: str, **kwargs: object) -> PriceProvider:
+    """
+    Return a PriceProvider by name.
+
+    Supported names:
+        "static"  — StaticPriceProvider; pass prices=dict[str, float]
+        "yahoo"   — YahooPriceProvider; pass isin_to_ticker=dict[str, str]
+                    and optionally fx_provider=FXProvider
+    """
+    if name == "static":
+        return StaticPriceProvider(prices=kwargs.get("prices", {}))  # type: ignore[arg-type]
+    if name == "yahoo":
+        return YahooPriceProvider(
+            isin_to_ticker=kwargs.get("isin_to_ticker", {}),  # type: ignore[arg-type]
+            fx_provider=kwargs.get("fx_provider"),  # type: ignore[arg-type]
+        )
+    raise ValueError(f"Unknown price provider: {name!r}. Use 'static' or 'yahoo'.")
+
+
+def fetch_current_prices(
+    isins: list[str],
+    provider: PriceProvider,
+    date: str,
+) -> dict[str, float]:
+    """
+    Fetch current prices in EUR for a list of ISINs using the given provider.
+
+    ISINs that raise KeyError or ValueError from the provider are silently
+    skipped — the caller should check for missing entries if needed.
+
+    Returns dict[isin, price_eur].
+    """
+    prices: dict[str, float] = {}
+    for isin in isins:
+        with contextlib.suppress(KeyError, ValueError):
+            prices[isin] = provider.price_eur(isin, date)
+    return prices
 
 
 # ── Lot engine ─────────────────────────────────────────────────────────────────
