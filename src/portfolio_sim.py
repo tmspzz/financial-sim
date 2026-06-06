@@ -562,6 +562,53 @@ def lots_to_dataframe(lots: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(lots)[LOT_COLUMNS]
 
 
+def initialize_lots_from_holdings(hld_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Seed the lot ledger from a holdings DataFrame that includes cost_basis_eur.
+
+    This is the fast path for starting a simulation from a broker statement
+    snapshot rather than replaying the full transaction history.  Each holding
+    row becomes one lot entry; rows with zero quantity or a missing cost basis
+    are dropped (they carry no cost information useful for gain/loss tracking).
+
+    Parameters
+    ----------
+    hld_df : pd.DataFrame
+        Holdings DataFrame, typically produced by ``parse_db_pdf``.  Must
+        contain columns: ``date``, ``isin``, ``quantity``, ``cost_basis_eur``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Lot ledger with LOT_COLUMNS: ``isin``, ``lot_date``,
+        ``lot_price_eur``, ``remaining_shares``.
+
+    Raises
+    ------
+    KeyError
+        If ``cost_basis_eur`` is not present in *hld_df*.
+    """
+    # Validate presence of required column (raises KeyError on miss)
+    _ = hld_df["cost_basis_eur"]
+
+    if hld_df.empty:
+        return pd.DataFrame(columns=LOT_COLUMNS)
+
+    df = hld_df[["date", "isin", "quantity", "cost_basis_eur"]].copy()
+    df = df[df["quantity"] > 0]
+    df = df[df["cost_basis_eur"].notna()]
+
+    lots = pd.DataFrame(
+        {
+            "isin": df["isin"].values,
+            "lot_date": df["date"].values,
+            "lot_price_eur": df["cost_basis_eur"].values,
+            "remaining_shares": df["quantity"].values,
+        }
+    )
+    return lots.reset_index(drop=True)
+
+
 # ── Reconciliation ─────────────────────────────────────────────────────────────
 
 

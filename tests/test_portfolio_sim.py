@@ -24,6 +24,7 @@ from portfolio_sim import (
     check_unsupported_actions,
     derive_holdings_from_lots,
     fetch_current_prices,
+    initialize_lots_from_holdings,
     lots_to_dataframe,
     make_fx_provider,
     make_price_provider,
@@ -702,3 +703,91 @@ class TestMakePriceProvider:
     def test_unknown_name_raises(self):
         with pytest.raises(ValueError, match="Unknown price provider"):
             make_price_provider("bloomberg")
+
+
+# ── Slice 6: Lot initialization from holdings ─────────────────────────────────
+
+
+def _hld_row(**overrides) -> dict:
+    """Minimal holdings row with cost_basis_eur (as produced by pdf_parser)."""
+    row = {
+        "date": "2026-06-06",
+        "isin": "US67066G1040",
+        "wkn": "A2N4XJ",
+        "asset_name": "NVIDIA Corp.",
+        "quantity": 34.0,
+        "price": 130.50,
+        "currency": "USD",
+        "market_value": 4437.00,
+        "jurisdiction": "US",
+        "cost_basis_eur": 89.20,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestInitializeLotsFromHoldings:
+    def test_single_row_maps_to_lot(self):
+        df = pd.DataFrame([_hld_row()])
+        lots = initialize_lots_from_holdings(df)
+        assert len(lots) == 1
+        row = lots.iloc[0]
+        assert row["isin"] == "US67066G1040"
+        assert row["lot_date"] == "2026-06-06"
+        assert row["lot_price_eur"] == pytest.approx(89.20)
+        assert row["remaining_shares"] == pytest.approx(34.0)
+
+    def test_output_has_exactly_lot_columns(self):
+        df = pd.DataFrame([_hld_row()])
+        lots = initialize_lots_from_holdings(df)
+        assert list(lots.columns) == LOT_COLUMNS
+
+    def test_zero_quantity_row_excluded(self):
+        rows = [_hld_row(quantity=34.0), _hld_row(isin="DE0005140008", quantity=0.0)]
+        df = pd.DataFrame(rows)
+        lots = initialize_lots_from_holdings(df)
+        assert len(lots) == 1
+        assert lots.iloc[0]["isin"] == "US67066G1040"
+
+    def test_nan_cost_basis_row_excluded(self):
+        import math
+
+        rows = [_hld_row(quantity=34.0), _hld_row(isin="DE0005140008", cost_basis_eur=float("nan"))]
+        df = pd.DataFrame(rows)
+        lots = initialize_lots_from_holdings(df)
+        assert len(lots) == 1
+        assert not math.isnan(lots.iloc[0]["lot_price_eur"])
+
+    def test_multiple_holdings_produce_multiple_lots(self):
+        rows = [
+            _hld_row(isin="US67066G1040", quantity=34.0, cost_basis_eur=89.20),
+            _hld_row(isin="IE00B4L5Y983", quantity=10.0, cost_basis_eur=55.10),
+            _hld_row(isin="DE0005140008", quantity=100.0, cost_basis_eur=12.50),
+        ]
+        df = pd.DataFrame(rows)
+        lots = initialize_lots_from_holdings(df)
+        assert len(lots) == 3
+
+    def test_missing_cost_basis_column_raises(self):
+        df = pd.DataFrame([_hld_row()]).drop(columns=["cost_basis_eur"])
+        with pytest.raises(KeyError, match="cost_basis_eur"):
+            initialize_lots_from_holdings(df)
+
+    def test_empty_dataframe_returns_empty_lots(self):
+        df = pd.DataFrame(
+            columns=[
+                "date",
+                "isin",
+                "wkn",
+                "asset_name",
+                "quantity",
+                "price",
+                "currency",
+                "market_value",
+                "jurisdiction",
+                "cost_basis_eur",
+            ]
+        )
+        lots = initialize_lots_from_holdings(df)
+        assert len(lots) == 0
+        assert list(lots.columns) == LOT_COLUMNS
