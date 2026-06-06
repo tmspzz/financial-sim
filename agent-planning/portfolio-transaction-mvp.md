@@ -71,13 +71,13 @@ Model Reviewer, Germany/Italy/EU Tax Reviewer, Senior Market Analyst):
   surcharge, and reverse-split fractional treatment are not modelled in v1.
 
 ## Slices
-- [ ] define canonical schemas: holdings, transaction (with `jurisdiction`), lot ledger (stored fields: `isin`, `lot_date`, `lot_price_EUR`, `remaining_shares`), FX, validation, and portfolio simulation output (`isin`, `reporting_date`, `market_value_EUR`, `unrealised_gain_EUR`, `realised_gain_ytd_EUR`, `tax_paid_ytd_EUR`). Write failing schema-validation tests first.
-- [ ] add synthetic Deutsche Bank-like CSV fixtures (`data/examples/`, `tests/fixtures/`) and confirm `data/private/` is gitignored. Write fixture-loading tests first.
-- [ ] implement normalization and validation scripts writing CSV and Parquet. Write failing round-trip tests first.
-- [ ] implement FX provider interface in `src/portfolio_sim.py` with ECB default and Yahoo option. Write failing provider tests first (mock HTTP).
-- [ ] implement lot engine in `src/portfolio_sim.py`: FIFO default, configurable method, split handling as first-class transaction type. Write failing tests first including `test_fifo_partial_sell_reduces_oldest_lot_first` and `test_forward_split_halves_lot_price_and_doubles_shares`.
-- [ ] reconcile transaction-derived holdings against holdings snapshots. Write failing reconciliation tests first.
-- [ ] implement per-security and portfolio aggregate simulation in `src/portfolio_sim.py` producing the named output schema. Write failing simulation tests first.
-- [ ] add partial-result handling for unsupported corporate actions with warned totals. Write failing tests for blocked-security behaviour first.
-- [ ] add notebook `06_portfolio_transaction_simulation.ipynb` reading validated Parquet and producing the portfolio report.
-- [ ] document implementation, known limitations (Pauschbetrag, solidarity surcharge, reverse-split fractional treatment), and files affected.
+- [x] define canonical schemas: holdings, transaction (with `jurisdiction`), lot ledger (stored fields: `isin`, `lot_date`, `lot_price_EUR`, `remaining_shares`), FX, validation, and portfolio simulation output (`isin`, `reporting_date`, `market_value_EUR`, `unrealised_gain_EUR`, `realised_gain_ytd_EUR`, `tax_paid_ytd_EUR`). Write failing schema-validation tests first.
+- [x] add synthetic Deutsche Bank-like CSV fixtures (`data/examples/`, `tests/fixtures/`) and confirm `data/private/` is gitignored. Write fixture-loading tests first.
+- [x] implement normalization and validation scripts writing CSV and Parquet. Write failing round-trip tests first.
+- [x] implement FX provider interface in `src/portfolio_sim.py` with ECB default and Yahoo option. Write failing provider tests first (mock HTTP).
+- [x] implement lot engine in `src/portfolio_sim.py`: FIFO default, configurable method, split handling as first-class transaction type. Write failing tests first including `test_fifo_partial_sell_reduces_oldest_lot_first` and `test_forward_split_halves_lot_price_and_doubles_shares`.
+- [x] reconcile transaction-derived holdings against holdings snapshots. Write failing reconciliation tests first.
+- [x] implement per-security and portfolio aggregate simulation in `src/portfolio_sim.py` producing the named output schema. Write failing simulation tests first.
+- [x] add partial-result handling for unsupported corporate actions with warned totals. Write failing tests for blocked-security behaviour first.
+- [x] add notebook `06_portfolio_transaction_simulation.ipynb` reading validated Parquet and producing the portfolio report.
+- [x] document implementation, known limitations (Pauschbetrag, solidarity surcharge, reverse-split fractional treatment), and files affected.

@@ -1,0 +1,6 @@
+date,isin,wkn,asset_name,transaction_type,quantity,price,currency,amount,fees,tax_withheld,jurisdiction
+2023-01-15,DE0005140008,514000,Deutsche Bank AG,buy,100,12.50,EUR,1250.00,9.90,0.00,DE
+2023-03-20,DE0005140008,514000,Deutsche Bank AG,dividend,0,0,EUR,45.00,0.00,11.70,DE
+2023-03-20,DE0005140008,514000,Deutsche Bank AG,tax_withheld,0,0,EUR,-11.70,0.00,11.70,DE
+2023-06-01,DE0005140008,514000,Deutsche Bank AG,buy,50,14.00,EUR,700.00,9.90,0.00,DE
+2023-09-15,DE0005140008,514000,Deutsche Bank AG,sell,80,15.50,EUR,1240.00,9.90,0.00,DE
