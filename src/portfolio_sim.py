@@ -854,7 +854,7 @@ def simulate_portfolio_partial(
 
 def simulate_from_snapshot(
     initial_lots: pd.DataFrame | list[dict],
-    new_transactions: pd.DataFrame,
+    new_transactions: pd.DataFrame | list,
     current_prices_eur: dict[str, float],
     capital_gains_tax_rate: float,
     dividend_tax_rate: float,
@@ -910,6 +910,9 @@ def simulate_from_snapshot(
 
     realised_gain: dict[str, float] = {}
     tax_paid: dict[str, float] = {}
+
+    if isinstance(new_transactions, list):
+        new_transactions = pd.DataFrame(new_transactions)
 
     if not new_transactions.empty:
         txns = new_transactions.sort_values("date").reset_index(drop=True)
