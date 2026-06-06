@@ -1,5 +1,30 @@
 # User Interrogation Skills
 
+## Local Entry Points
+
+This file is the shared source of truth for the project's interrogation and
+planning workflows.
+
+Tool-specific wrappers should point back here instead of duplicating the full
+workflow:
+
+```text
+.codex/skills/grill-me/SKILL.md
+.codex/skills/to-prd/SKILL.md
+.codex/skills/to-issues/SKILL.md
+.codex/skills/tdd/SKILL.md
+.codex/skills/improve-codebase-architecture/SKILL.md
+
+.claude/commands/grill-me.md
+.claude/commands/to-prd.md
+.claude/commands/to-issues.md
+.claude/commands/tdd.md
+.claude/commands/improve-codebase-architecture.md
+```
+
+If the user types a slash-style command such as `/grill-me`, treat that as an
+explicit request to use the corresponding workflow below.
+
 Use this file when a task is unclear, strategically important, or likely to produce the wrong result unless the user and agent reach shared understanding first.
 
 This guidance adapts the AI Hero / Matt Pocock skill set from:
@@ -168,7 +193,7 @@ Do not ask when the answer is discoverable from:
 ```text
 src/tax_risk_sim.py
 notebooks/
-agents/
+.agents/
 tests/
 executed/results_summary.txt
 ```

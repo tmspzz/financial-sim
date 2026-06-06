@@ -36,6 +36,25 @@ When the task needs structured user interrogation or clarification, use:
 .agents/user-interrogation-skills.md
 ```
 
+If the user types one of these slash-style workflow names, treat it as an
+explicit trigger and read `.agents/user-interrogation-skills.md` before
+answering:
+
+```text
+/grill-me
+/to-prd
+/to-issues
+/tdd
+/improve-codebase-architecture
+```
+
+Local entry points are provided for tool-specific discovery:
+
+```text
+.codex/skills/      ← Codex project skill wrappers
+.claude/commands/   ← Claude Code slash-command wrappers
+```
+
 For durable learning capture and shell-tooling notes, read:
 
 ```text
