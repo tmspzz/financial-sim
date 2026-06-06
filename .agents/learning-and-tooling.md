@@ -16,10 +16,24 @@ Do not create noisy process notes after small edits. Use this only when the sess
 
 ## Privacy — never commit data/private/ filenames
 
-**Rule:** Never write a filename from `data/private/` into any committed file —
-notebook cell, script, plan, doc, or comment. That directory is gitignored but
-filenames embedded in committed sources leak account numbers, dates, and other
-identifying information into the repository and its full git history.
+**Rule:** Never write any private financial value — portfolio totals, position
+values, cost bases, account numbers, or broker filenames — into any committed
+file. This includes notebook cells, scripts, plan files, docs, commit messages,
+and test fixtures. Everything committed is permanent in `git log -p` unless
+history is rewritten with `git filter-repo`.
+
+Specifically never commit:
+- Filenames from `data/private/` (encode account numbers and dates)
+- Actual portfolio totals or position market values derived from private data
+- Real cost-basis figures, prices, or gain amounts from a live broker report
+- Any number that uniquely identifies the user's portfolio composition
+
+In test fixtures, always use obviously synthetic values (e.g. round numbers,
+`SYN001`, `412,34567`) — not values copy-pasted from a live PDF run.
+
+In plan files and commit messages, describe changes in relative or general
+terms ("positions were under-reported", "total did not match broker") — never
+paste the actual broker figure.
 
 **Why this matters:** A broker report filename like
 `Report_<account>_<date>.pdf` encodes both the account number and the statement
