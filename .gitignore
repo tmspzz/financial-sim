@@ -24,6 +24,11 @@ __pycache__/
 # Nothing from the project itself ends up here, but ignore any local overrides.
 docker-compose.override.yml
 
+# ── Private portfolio data ────────────────────────────────────────────────────
+# Real broker exports, statements, and transaction files. Never committed.
+# Commit only synthetic fixtures under data/examples/ or tests/fixtures/.
+data/private/
+
 # ── Environment / secrets ─────────────────────────────────────────────────────
 .env
 .env.*
