@@ -10,7 +10,7 @@ conversion, and portfolio-level reporting.
 - Start from both holdings snapshots and transactions.
 - Treat transactions as source of truth when available.
 - Use holdings snapshots for reconciliation and validation.
-- Require broker/validated-input-provided security prices in v1.
+- Require broker/validated-input-provided security prices in v1. *(Superseded: optional YahooPriceProvider + ISIN→ticker map now available for live price lookup.)*
 - Fetch FX rates through a configurable provider interface.
 - Default FX provider to ECB for EUR reporting; allow Yahoo by configuration.
 - Use transaction-date FX where applicable.
@@ -32,7 +32,7 @@ conversion, and portfolio-level reporting.
 - Ignore real data under `data/private/`.
 - Commit only synthetic fixtures under `tests/fixtures/` or `data/examples/`.
 - Defer Deutsche Bank PDF parser implementation until a redacted/synthetic PDF
-  fixture or real table sample is available.
+  fixture or real table sample is available. *(Superseded: implemented in `src/pdf_parser.py` — see `agent-planning/db-pdf-parser.md`.)*
 
 ## Module boundaries
 
@@ -80,4 +80,5 @@ Model Reviewer, Germany/Italy/EU Tax Reviewer, Senior Market Analyst):
 - [x] implement per-security and portfolio aggregate simulation in `src/portfolio_sim.py` producing the named output schema. Write failing simulation tests first.
 - [x] add partial-result handling for unsupported corporate actions with warned totals. Write failing tests for blocked-security behaviour first.
 - [x] add notebook `06_portfolio_transaction_simulation.ipynb` reading validated Parquet and producing the portfolio report.
+- [x] wire notebook 06 to accept Deutsche Bank PDF input via `MODE = "pdf"` switch — parse_db_pdf → lot engine → reconcile; `MODE = "synthetic"` preserves the original CSV/Parquet path.
 - [x] document implementation, known limitations (Pauschbetrag, solidarity surcharge, reverse-split fractional treatment), and files affected.

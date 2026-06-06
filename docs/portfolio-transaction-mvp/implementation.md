@@ -59,8 +59,10 @@ scripts/parse_db_pdf.py
    -> writes canonical CSV and Parquet
 
 notebooks/06_portfolio_transaction_simulation.ipynb
-   reads Parquet
-   -> configures FX provider (ECB default, Yahoo or FixedRate alternatives)
+   MODE = "pdf"       → parse_db_pdf → tx_df + hld_df; live prices via Yahoo/ECB
+   MODE = "synthetic" → reads Parquet from normalize_portfolio_inputs.py (offline)
+   both modes →
+   -> configures FX provider (ECB for pdf, FixedRate stub for synthetic)
    -> checks for unsupported corporate actions
    -> simulate_portfolio_partial() → output DataFrame
    -> reconcile_holdings() against broker snapshot
@@ -157,8 +159,10 @@ This is used by `scripts/portfolio_snapshot.py`,
 
 ## Assumptions
 
-- Security prices at the reporting date are supplied by the caller. The simulation
-  does not fetch stock or ETF prices automatically.
+- Security prices at the reporting date can be supplied statically or fetched live.
+  The canonical CSV/Parquet path requires caller-supplied prices. The PDF path and
+  real-portfolio scripts use `YahooPriceProvider` + a user-maintained ISIN→ticker
+  map for automatic live price lookup.
 - Tax rates are flat across all securities. Jurisdiction-specific rules are not
   applied in v1.
 - Transaction-date FX rates are used throughout. Intraday spot rates are not

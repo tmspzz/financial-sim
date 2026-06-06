@@ -144,11 +144,20 @@ The project now has three portfolio-facing workflows:
 ```text
 scripts/normalize_portfolio_inputs.py
 scripts/validate_portfolio_inputs.py
-notebooks/06_portfolio_transaction_simulation.ipynb
+notebooks/06_portfolio_transaction_simulation.ipynb  (MODE = "synthetic")
 ```
 
 Use these for canonical CSV/Parquet input validation and the synthetic
 transaction-aware MVP.
+
+```text
+notebooks/06_portfolio_transaction_simulation.ipynb  (MODE = "pdf")
+```
+
+Use this to reconstruct portfolio history directly from a Deutsche Bank PDF.
+The notebook parses the PDF, replays transactions through the FIFO lot engine,
+and reconciles derived holdings against the broker snapshot. Set `MODE = "pdf"`
+in cell 2; all other steps are identical to synthetic mode.
 
 ```text
 scripts/parse_db_pdf.py
