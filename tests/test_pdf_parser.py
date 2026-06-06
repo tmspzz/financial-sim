@@ -14,12 +14,14 @@ import pandas as pd
 import pytest
 
 from pdf_parser import (
+    _HLD_ISIN_LINE_QUICK_RE,
     _derive_split_ratios,
     _has_isin,
     _is_tx_start_line,
     _jurisdiction_from_isin,
     _parse_date,
     _parse_german_number,
+    _parse_holdings_block,
     _parse_isin_line,
     _parse_tx_block,
 )
@@ -126,6 +128,104 @@ class TestHasISIN:
         assert not _has_isin(
             "05.06.2026 000000000000 Kauf 27 SYNTHETICETFIOTA SYN009 EUR 78,18400 -2.117,87"  # noqa: E501
         )
+
+
+# ── Holdings ISIN line quick regex tests ──────────────────────────────────────
+
+
+class TestHldISINLineQuickRE:
+    """_HLD_ISIN_LINE_QUICK_RE must match real ISIN lines and reject
+    company-name tokens that happen to look like ISINs to _has_isin."""
+
+    def test_matches_real_isin_line(self):
+        # Typical holdings ISIN line: date + depot-no + ISIN + currency + ...
+        line = "06.06.2026 NL0010273215 15,74 0,00"
+        assert _HLD_ISIN_LINE_QUICK_RE.match(line)
+
+    def test_matches_isin_line_minimal(self):
+        line = "06.06.2026 IE00B945VV12"
+        assert _HLD_ISIN_LINE_QUICK_RE.match(line)
+
+    def test_rejects_asml_company_name_token(self):
+        # "ASMLHOLDINGN" triggered _has_isin because it looks like a 12-char ISIN.
+        # The primary line starts with a quantity, not a date — must NOT match.
+        line = (
+            "22 ASMLHOLDINGN.V.AANDELENOPNAAM EO-,09 SYN001 EUR"
+            " 1.400,00000 14,20 200,00 3.159,40 22,24"
+        )
+        assert not _HLD_ISIN_LINE_QUICK_RE.match(line)
+
+    def test_rejects_vanguard_company_name_token(self):
+        # "UETFEODFUNDS" in Vanguard FTSE name similarly triggered a false positive.
+        line = "100 VANG.FTSEDEV.EU.UETFEODFUNDS SYN002 EUR 25,00000 2,50 62,50 1.947,00 6,25"
+        assert not _HLD_ISIN_LINE_QUICK_RE.match(line)
+
+    def test_rejects_transaction_primary_line(self):
+        line = "05.06.2026 000000000000 Kauf 27 SYNTHETICETFIOTA SYN009 EUR 78,18400 -2.117,87"
+        assert not _HLD_ISIN_LINE_QUICK_RE.match(line)
+
+    def test_rejects_name_continuation_line(self):
+        assert not _HLD_ISIN_LINE_QUICK_RE.match("EO-,09")
+        assert not _HLD_ISIN_LINE_QUICK_RE.match("DL-,001")
+
+
+# ── Holdings block parser tests ───────────────────────────────────────────────
+
+
+class TestParseHoldingsBlock:
+    REPORT_DATE = "2026-06-06"
+
+    def _asml_block(self):
+        # Real line format (sanitised with synthetic WKN/values):
+        # QTY NAME WKN COST_BASIS CCY CURRENT_PRICE GAIN_EUR MV PCT
+        # ISIN line: DATE ISIN GAIN_PCT ACCRUED
+        return [
+            "22 ASMLHOLDINGN.V.AANDELENOPNAAM SYN001 412,34567 EUR"  # noqa: E501
+            " 1.234,56789 7.654,32 27.160,50 18,55",
+            "EO-,09",
+            "01.03.2025 NL0010273215 43,26 0,00",
+        ]
+
+    def _vanguard_block(self):
+        return [
+            "60 VANG.FTSEDEV.EU.UETFEODFUNDS SYN002 35,12500 EUR 32,45000 23,45 1.947,00 8,24",
+            "05.06.2026 IE00B945VV12 8,24 0,00",
+        ]
+
+    def test_asml_isin_parsed(self):
+        rec = _parse_holdings_block(self._asml_block(), self.REPORT_DATE)
+        assert rec is not None
+        assert rec["isin"] == "NL0010273215"
+
+    def test_asml_quantity_and_cost_basis(self):
+        rec = _parse_holdings_block(self._asml_block(), self.REPORT_DATE)
+        assert rec["quantity"] == pytest.approx(22.0)
+        assert rec["cost_basis_eur"] == pytest.approx(412.34567)
+
+    def test_asml_name_includes_continuation(self):
+        rec = _parse_holdings_block(self._asml_block(), self.REPORT_DATE)
+        assert "ASMLHOLDINGN" in rec["asset_name"]
+        assert "EO-,09" in rec["asset_name"]
+
+    def test_vanguard_isin_parsed(self):
+        rec = _parse_holdings_block(self._vanguard_block(), self.REPORT_DATE)
+        assert rec is not None
+        assert rec["isin"] == "IE00B945VV12"
+
+    def test_vanguard_market_value(self):
+        rec = _parse_holdings_block(self._vanguard_block(), self.REPORT_DATE)
+        assert rec["market_value"] == pytest.approx(1947.00)
+        assert rec["quantity"] == pytest.approx(60.0)
+
+    def test_block_too_short_returns_none(self):
+        assert _parse_holdings_block(["only one line"], self.REPORT_DATE) is None
+
+    def test_missing_isin_line_returns_none(self):
+        block = [
+            "22 SOMECOMPANY SYN001 EUR 100,00000 110,00000 22,00 2.420,00 10,00",
+            "not an isin line at all",
+        ]
+        assert _parse_holdings_block(block, self.REPORT_DATE) is None
 
 
 # ── ISIN line parser tests ─────────────────────────────────────────────────────
