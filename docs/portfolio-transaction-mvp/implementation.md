@@ -61,10 +61,19 @@ scripts/parse_db_pdf.py
 notebooks/06_portfolio_transaction_simulation.ipynb
    MODE = "pdf"       → parse_db_pdf → tx_df + hld_df; live prices via Yahoo/ECB
    MODE = "synthetic" → reads Parquet from normalize_portfolio_inputs.py (offline)
-   both modes →
-   -> configures FX provider (ECB for pdf, FixedRate stub for synthetic)
+
+   PDF mode:
+   -> configures ECB FX provider
+   -> initialize_lots_from_holdings(hld_df) → seeds lot ledger from broker snapshot
+   -> simulate_from_snapshot(new_transactions=empty) → output DataFrame
+      (uses broker holdings as authoritative starting state; no transaction replay)
+
+   Synthetic mode:
+   -> configures FixedRate stub FX provider
    -> checks for unsupported corporate actions
    -> simulate_portfolio_partial() → output DataFrame
+
+   both modes →
    -> reconcile_holdings() against broker snapshot
    -> lots_to_dataframe() + derived unrealised gain per lot
 
@@ -180,7 +189,7 @@ This is used by `scripts/portfolio_snapshot.py`,
 | Unsupported corporate actions | `merger`, `spin_off`, `option` block the affected ISIN from trusted totals. There is no partial-valuation model for in-progress corporate actions. |
 | Jurisdiction-aware tax | `jurisdiction` field is captured and validated but not yet used to branch tax logic by country. Italian or other EU treatments are deferred. |
 | Transaction-date FX | Cross-currency lots use the FX rate on the transaction date. If the same security is bought in multiple currencies on different dates the basis is consistent within each lot but no average is taken across lots. |
-| PDF parser | Implemented for the observed Deutsche Bank Vermögensanlage-Report format only. Other Deutsche Bank report types or changed layouts need fixtures and parser updates. |
+| PDF parser | Implemented for the observed Deutsche Bank Vermögensanlage-Report format only. Other Deutsche Bank report types or changed layouts need fixtures and parser updates. The ISIN detection in `_extract_holdings` uses a date-anchored regex (`_HLD_ISIN_LINE_QUICK_RE`) to avoid false-positive matches on long uppercase company-name tokens (e.g. "ASMLHOLDINGN"). The generic `_has_isin` helper is intentionally not used there. |
 | Security price lookup | Optional Yahoo-backed price lookup now exists, but requires a user-maintained ISIN → ticker map. Missing mappings are skipped or warned, so reports can exclude positions without mapped prices. |
 
 Real ticker maps should live in ignored `data/private/ticker_map.json`. The committed
