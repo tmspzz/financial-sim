@@ -14,12 +14,12 @@ absent from the live-price dict. Call it in notebook 06 before the simulation.
 
 ## Slices
 
-- [ ] Write failing unit test for `fill_missing_prices_from_holdings` in
+- [x] Write failing unit test for `fill_missing_prices_from_holdings` in
   `tests/test_portfolio_sim.py` — covers: missing ISINs get broker-implied price,
   existing prices are not overwritten, zero-quantity positions are skipped
-- [ ] Implement `fill_missing_prices_from_holdings(prices_eur, hld_df) -> dict`
+- [x] Implement `fill_missing_prices_from_holdings(prices_eur, hld_df) -> dict`
   in `src/portfolio_sim.py`
-- [ ] Update notebook 06 PDF-mode price cell to call the new helper after
+- [x] Update notebook 06 PDF-mode price cell to call the new helper after
   Yahoo fetch, and update the WARNING display to distinguish live vs imputed prices
-- [ ] Run full quality suite and verify notebook 06 totals match broker value
-- [ ] Reconcile docs/plans
+- [x] Run full quality suite and verify notebook 06 totals match broker value
+- [x] Reconcile docs/plans

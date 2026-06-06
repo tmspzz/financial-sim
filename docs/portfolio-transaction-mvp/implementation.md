@@ -161,6 +161,9 @@ The current implementation also includes optional `PriceProvider` abstractions:
 - `StaticPriceProvider` for offline JSON-provided prices.
 - `YahooPriceProvider` for live prices using a user-supplied ISIN → Yahoo ticker
   map, with FX conversion through the configured FX provider.
+- `fill_missing_prices_from_holdings(prices_eur, hld_df)` — fills in broker-implied
+  prices (`market_value / quantity`) for any ISIN absent from the live-price dict.
+  Used in notebook 06 so positions without a ticker mapping are not silently excluded.
 
 This is used by `scripts/portfolio_snapshot.py`,
 `scripts/stop_loss_real_portfolio.py`, and
