@@ -121,9 +121,9 @@ scripts/stop_loss_real_portfolio.py
 Data:
 
 ```text
-data/private/        ← gitignored real broker PDFs, CSVs, Parquet, price files
-data/ticker_map.json ← committed ISIN→Yahoo ticker map (no prices; safe to commit)
-data/examples/       ← committed synthetic examples only
+data/private/             ← gitignored real broker PDFs, CSVs, Parquet, price files
+data/private/ticker_map.json ← ISIN→Yahoo ticker map (gitignored; real mappings live here)
+data/examples/            ← committed synthetic examples only
 tests/fixtures/      ← committed synthetic parser/model fixtures only
 ```
 
