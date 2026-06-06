@@ -90,6 +90,11 @@ _HLD_ISIN_LINE_RE = re.compile(
     r"([\d\.,]+)"  # accrued interest
 )
 
+# Fast date-anchored check used inside _extract_holdings to avoid false-positive
+# ISIN matches in company names (e.g. "ASMLHOLDINGN" looks like an ISIN to the
+# generic _has_isin check).
+_HLD_ISIN_LINE_QUICK_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}\s+[A-Z]{2}[A-Z0-9]{10}")
+
 
 # ── Utility functions ─────────────────────────────────────────────────────────
 
@@ -495,11 +500,11 @@ def _extract_holdings(pdf: Any, report_date: str) -> list[dict[str, Any]]:
                     current = []
                 continue
 
-            if _HLD_START_RE.match(line) and not _has_isin(line):
+            if _HLD_START_RE.match(line) and not _HLD_ISIN_LINE_QUICK_RE.match(line):
                 if current:
                     current = []
                 current = [line]
-            elif _has_isin(line) and current:
+            elif _HLD_ISIN_LINE_QUICK_RE.match(line) and current:
                 current.append(line)
                 rec = _parse_holdings_block(current, report_date)
                 if rec is not None:
