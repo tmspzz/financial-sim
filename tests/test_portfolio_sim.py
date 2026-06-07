@@ -12,12 +12,17 @@ from portfolio_sim import (
     LOT_COLUMNS,
     SIMULATION_OUTPUT_COLUMNS,
     TRANSACTION_COLUMNS,
+    ChainedConstituentProvider,
+    ConstituentResult,
+    ConstituentRow,
+    CsvConstituentProvider,
     ECBProvider,
     PriceProvider,
     StaticPriceProvider,
     UnsupportedCorporateAction,
     YahooPriceProvider,
     YahooProvider,
+    YahooTopHoldingsProvider,
     apply_buy,
     apply_sell_fifo,
     apply_split,
@@ -997,3 +1002,974 @@ class TestFillMissingPricesFromHoldings:
         result = fill_missing_prices_from_holdings(original, hld)
         assert original == {}
         assert "DE00SYNTH001" in result
+
+
+# ── Slice 1: ETF constituent providers ────────────────────────────────────────
+
+# Synthetic iShares-style CSV (metadata rows + column headers + data rows).
+_ISHARES_CSV = """\
+"iShares Core MSCI Test UCITS ETF USD (Acc)"
+"Fund Holdings as of","31/Dec/2025"
+"Reporting Currency","EUR"
+"Net Assets of Fund (EUR)","1,000,000,000"
+""
+"Name","ISIN","Asset Class","Market Value","Weight (%)","Shares","Price","Location"
+"ASML HOLDING NV","NL0010273215","Equity","52,000,000","5.20","130000","400.00","Netherlands"
+"APPLE INC","US0378331005","Equity","48,000,000","4.80","237000","202.35","United States"
+"CASH AND/OR DERIVATIVES","","Cash","5,000,000","0.50","","","N/A"
+"""
+
+# Yahoo topHoldings JSON response (top 2 only, ~55% coverage).
+_YAHOO_TOP_HOLDINGS = {
+    "quoteSummary": {
+        "result": [
+            {
+                "topHoldings": {
+                    "asOfDate": {"raw": 1751241600, "fmt": "2025-06-30"},
+                    "holdingsPercent": {"raw": 0.55},
+                    "holdings": [
+                        {
+                            "symbol": "ASML",
+                            "holdingName": "ASML Holding NV",
+                            "holdingPercent": {"raw": 0.0520},
+                        },
+                        {
+                            "symbol": "AAPL",
+                            "holdingName": "Apple Inc",
+                            "holdingPercent": {"raw": 0.0480},
+                        },
+                    ],
+                }
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+class TestCsvConstituentProvider:
+    def _make_response(self, text: str) -> MagicMock:
+        resp = MagicMock()
+        resp.text = text
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_parses_ishares_csv(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        assert result.etf_isin == "IE00TEST0001"
+        assert result.source == "csv"
+        isins = [c.isin for c in result.constituents]
+        assert "NL0010273215" in isins
+        assert "US0378331005" in isins
+
+    def test_weights_parsed_correctly(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        asml = next(c for c in result.constituents if c.isin == "NL0010273215")
+        assert asml.weight == pytest.approx(0.0520, abs=1e-4)
+
+    def test_rows_without_isin_excluded_from_constituents(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        assert all(c.isin for c in result.constituents)
+
+    def test_coverage_pct_excludes_no_isin_rows(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        # Total weight = 5.20 + 4.80 + 0.50 = 10.50; ISIN-covered = 10.00
+        assert result.coverage_pct == pytest.approx(10.00 / 10.50, abs=1e-4)
+
+    def test_as_of_parsed_from_csv(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        assert result.as_of == "2025-12-31"
+
+    def test_result_cached_to_disk(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)
+        ) as mock_get:
+            provider.get_constituents("IE00TEST0001")
+            provider.get_constituents("IE00TEST0001")  # second call
+
+        # HTTP should only be fetched once; second call reads from disk cache
+        mock_get.assert_called_once()
+
+    def test_unknown_isin_raises_key_error(self, tmp_path):
+        provider = CsvConstituentProvider(url_map={}, cache_dir=tmp_path)
+        with pytest.raises(KeyError):
+            provider.get_constituents("IE00UNKNOWN0")
+
+    def test_staleness_flag_when_over_90_days(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        # holdings as_of = 2025-12-31; snapshot 2026-06-07 = 158 days later → stale
+        assert result.is_stale(snapshot_date="2026-06-07") is True
+
+    def test_no_staleness_flag_within_90_days(self, tmp_path):
+        provider = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_ISHARES_CSV)):
+            result = provider.get_constituents("IE00TEST0001")
+
+        # 2026-01-15 is only 15 days after 2025-12-31 → not stale
+        assert result.is_stale(snapshot_date="2026-01-15") is False
+
+
+class TestYahooTopHoldingsProvider:
+    def _make_response(self, payload: dict) -> MagicMock:
+        resp = MagicMock()
+        resp.json = MagicMock(return_value=payload)
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_returns_top_holdings(self):
+        provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+        ):
+            result = provider.get_constituents("IE00TEST0001")
+
+        assert result.etf_isin == "IE00TEST0001"
+        assert result.source == "yahoo_top_holdings"
+        assert len(result.constituents) == 2
+
+    def test_weights_from_holdingPercent(self):
+        provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+        ):
+            result = provider.get_constituents("IE00TEST0001")
+
+        names = {c.name: c.weight for c in result.constituents}
+        assert names["ASML Holding NV"] == pytest.approx(0.0520, abs=1e-4)
+
+    def test_coverage_pct_from_holdingsPercent(self):
+        provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+        ):
+            result = provider.get_constituents("IE00TEST0001")
+
+        assert result.coverage_pct == pytest.approx(0.55, abs=1e-4)
+
+    def test_isin_none_when_no_reverse_map(self):
+        provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+        ):
+            result = provider.get_constituents("IE00TEST0001")
+
+        assert all(c.isin is None for c in result.constituents)
+
+    def test_isin_resolved_via_reverse_ticker_map(self):
+        reverse = {"ASML": "NL0010273215"}
+        provider = YahooTopHoldingsProvider(
+            isin_to_ticker={"IE00TEST0001": "IWDA.AS"},
+            reverse_ticker_map=reverse,
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+        ):
+            result = provider.get_constituents("IE00TEST0001")
+
+        asml = next(c for c in result.constituents if c.name == "ASML Holding NV")
+        assert asml.isin == "NL0010273215"
+
+    def test_unknown_isin_raises_key_error(self):
+        provider = YahooTopHoldingsProvider(isin_to_ticker={})
+        with pytest.raises(KeyError):
+            provider.get_constituents("IE00UNKNOWN0")
+
+
+class TestChainedConstituentProvider:
+    def test_returns_first_provider_result(self, tmp_path):
+        good = CsvConstituentProvider(
+            url_map={"IE00TEST0001": "https://example.com/holdings.csv"},
+            cache_dir=tmp_path,
+        )
+        fallback = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        chained = ChainedConstituentProvider([good, fallback])
+
+        with patch("portfolio_sim.requests.get") as mock_get:
+
+            def side_effect(url, **kwargs):
+                resp = MagicMock()
+                resp.raise_for_status = MagicMock()
+                resp.text = _ISHARES_CSV
+                return resp
+
+            mock_get.side_effect = side_effect
+            result = chained.get_constituents("IE00TEST0001")
+
+        assert result.source == "csv"
+
+    def test_falls_through_to_second_on_key_error(self):
+        no_url = CsvConstituentProvider(url_map={})
+        fallback = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        chained = ChainedConstituentProvider([no_url, fallback])
+
+        with patch("portfolio_sim.requests.get") as mock_get:
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = MagicMock(return_value=_YAHOO_TOP_HOLDINGS)
+            mock_get.return_value = resp
+            result = chained.get_constituents("IE00TEST0001")
+
+        assert result.source == "yahoo_top_holdings"
+
+    def test_raises_key_error_when_all_fail(self):
+        chained = ChainedConstituentProvider(
+            [
+                CsvConstituentProvider(url_map={}),
+                YahooTopHoldingsProvider(isin_to_ticker={}),
+            ]
+        )
+        with pytest.raises(KeyError):
+            chained.get_constituents("IE00UNKNOWN0")
+
+
+# ── Slice 2: Security metadata provider ───────────────────────────────────────
+
+# Synthetic Yahoo quoteSummary response for a stock (ASML-like).
+_YAHOO_STOCK_SUMMARY = {
+    "quoteSummary": {
+        "result": [
+            {
+                "assetProfile": {
+                    "sector": "Technology",
+                    "industry": "Semiconductor Equipment & Materials",
+                    "country": "Netherlands",
+                },
+                "defaultKeyStatistics": {
+                    "beta": {"raw": 1.15},
+                },
+                "summaryDetail": {
+                    "marketCap": {"raw": 250_000_000_000},  # ~€250B
+                },
+                "price": {
+                    "quoteType": {"longValue": "EQUITY"},
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+# Synthetic Yahoo response for an accumulating ETF (IWDA-like).
+_YAHOO_ETF_SUMMARY = {
+    "quoteSummary": {
+        "result": [
+            {
+                "assetProfile": {
+                    "sector": None,
+                    "industry": None,
+                    "country": "Ireland",
+                },
+                "defaultKeyStatistics": {
+                    "beta": {"raw": 0.98},
+                },
+                "summaryDetail": {
+                    "marketCap": {"raw": 84_000_000_000},
+                },
+                "price": {
+                    "quoteType": {"longValue": "ETF"},
+                },
+            }
+        ],
+        "error": None,
+    }
+}
+
+
+class TestYahooFinanceMetadataProvider:
+    def _make_response(self, payload: dict) -> MagicMock:
+        resp = MagicMock()
+        resp.json = MagicMock(return_value=payload)
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_imports(self):
+        from portfolio_sim import SecurityMetadata, YahooFinanceMetadataProvider  # noqa: F401
+
+    def test_returns_sector_country_industry(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta.json",
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+        ):
+            meta = provider.get_metadata("NL0010273215")
+
+        assert meta.sector == "Technology"
+        assert meta.country == "Netherlands"
+        assert meta.industry == "Semiconductor Equipment & Materials"
+
+    def test_beta_returned(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta.json",
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+        ):
+            meta = provider.get_metadata("NL0010273215")
+
+        assert meta.beta == pytest.approx(1.15, abs=1e-4)
+
+    def test_market_cap_tier_large(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta.json",
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+        ):
+            meta = provider.get_metadata("NL0010273215")
+
+        assert meta.market_cap_tier == "Large"  # >€10B
+
+    def test_etf_domicile_from_isin_prefix(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"IE00B4L5Y983": "IWDA.AS"},
+            cache_path=tmp_path / "meta.json",
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_ETF_SUMMARY)
+        ):
+            meta = provider.get_metadata("IE00B4L5Y983")
+
+        assert meta.etf_domicile == "Ireland"
+
+    def test_etf_structure_from_override_map(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"IE00B4L5Y983": "IWDA.AS"},
+            cache_path=tmp_path / "meta.json",
+            etf_structure_overrides={"IE00B4L5Y983": "accumulating"},
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_ETF_SUMMARY)
+        ):
+            meta = provider.get_metadata("IE00B4L5Y983")
+
+        assert meta.etf_structure == "accumulating"
+
+    def test_etf_structure_heuristic_fallback(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider, _YahooTickerCache
+
+        # No override; ticker name contains "(Acc)" → heuristic picks it up.
+        # Use a fresh ticker cache so a previous test's cached payload doesn't
+        # interfere with the longName heuristic.
+        summary = {
+            "quoteSummary": {
+                "result": [
+                    {
+                        "assetProfile": {"sector": None, "industry": None, "country": "Ireland"},
+                        "defaultKeyStatistics": {"beta": {"raw": 0.98}},
+                        "summaryDetail": {"marketCap": {"raw": 84_000_000_000}},
+                        "price": {
+                            "quoteType": {"longValue": "ETF"},
+                            "longName": "iShares Core MSCI World UCITS ETF USD (Acc)",
+                        },
+                    }
+                ],
+                "error": None,
+            }
+        }
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"IE00B4L5Y983": "IWDA.AS"},
+            cache_path=tmp_path / "meta.json",
+            ticker_cache=_YahooTickerCache(),  # isolated from module-level cache
+        )
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(summary)):
+            meta = provider.get_metadata("IE00B4L5Y983")
+
+        assert meta.etf_structure == "accumulating"
+
+    def test_result_cached_to_disk(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider, _YahooTickerCache
+
+        cache = tmp_path / "meta.json"
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=cache,
+            ticker_cache=_YahooTickerCache(),  # isolated so HTTP call always fires on first fetch
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+        ) as mock_get:
+            provider.get_metadata("NL0010273215")
+            provider.get_metadata("NL0010273215")  # second call reads from disk cache
+
+        mock_get.assert_called_once()
+
+    def test_ticker_fetched_once_per_session(self, tmp_path):
+        """_YahooTickerCache: same ticker shared across two provider instances."""
+        from portfolio_sim import YahooFinanceMetadataProvider, _YahooTickerCache
+
+        cache = _YahooTickerCache()
+        p1 = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta.json",
+            ticker_cache=cache,
+        )
+        p2 = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta2.json",
+            ticker_cache=cache,
+        )
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+        ) as mock_get:
+            p1.get_metadata("NL0010273215")
+            p2.get_metadata("NL0010273215")
+
+        # Both providers share the cache → only one HTTP call total
+        mock_get.assert_called_once()
+
+    def test_unknown_isin_raises_key_error(self, tmp_path):
+        from portfolio_sim import YahooFinanceMetadataProvider
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={},
+            cache_path=tmp_path / "meta.json",
+        )
+        with pytest.raises(KeyError):
+            provider.get_metadata("XX00UNKNOWN0")
+
+
+# ── Slice 3: Look-through aggregation ─────────────────────────────────────────
+
+
+def _meta(
+    isin,
+    sector="Technology",
+    country="Netherlands",
+    industry="Semiconductors",
+    market_cap_tier="Large",
+    beta=1.1,
+    etf_structure="unknown",
+    etf_domicile=None,
+):
+    from portfolio_sim import SecurityMetadata
+
+    return SecurityMetadata(
+        isin=isin,
+        ticker=None,
+        sector=sector,
+        country=country,
+        industry=industry,
+        market_cap_eur=50_000_000_000,
+        market_cap_tier=market_cap_tier,
+        beta=beta,
+        etf_structure=etf_structure,
+        etf_domicile=etf_domicile or isin[:2],
+    )
+
+
+def _make_stub_metadata_provider(metas: list):
+    from portfolio_sim import YahooFinanceMetadataProvider
+
+    provider = MagicMock(spec=YahooFinanceMetadataProvider)
+    lookup = {m.isin: m for m in metas}
+    provider.get_metadata.side_effect = lambda isin: lookup[isin]
+    return provider
+
+
+def _make_stub_constituent_provider(results: list):
+    from portfolio_sim import ETFConstituentProvider
+
+    provider = MagicMock(spec=ETFConstituentProvider)
+    lookup = {r.etf_isin: r for r in results}
+
+    def _get(isin):
+        if isin not in lookup:
+            raise KeyError(isin)
+        return lookup[isin]
+
+    provider.get_constituents.side_effect = _get
+    return provider
+
+
+def _holdings_df(rows: list[dict]) -> pd.DataFrame:
+    defaults = {
+        "date": "2025-12-31",
+        "wkn": "",
+        "asset_name": "Test",
+        "currency": "EUR",
+        "jurisdiction": "NL",
+    }
+    out = []
+    for r in rows:
+        row = {**defaults, **r}
+        row.setdefault("market_value", row["quantity"] * row["price"])
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+class TestAggregatePortfolioComposition:
+    def test_imports(self):
+        from portfolio_sim import CompositionResult, aggregate_portfolio_composition  # noqa: F401
+
+    def test_direct_holding_appears_with_full_weight(self):
+        from portfolio_sim import aggregate_portfolio_composition
+
+        hld = _holdings_df(
+            [
+                {"isin": "NL0010273215", "quantity": 10, "price": 400.0},  # ASML €4000
+                {"isin": "US0378331005", "quantity": 5, "price": 200.0},  # Apple €1000
+            ]
+        )
+        meta_provider = _make_stub_metadata_provider(
+            [
+                _meta("NL0010273215"),
+                _meta("US0378331005"),
+            ]
+        )
+        const_provider = _make_stub_constituent_provider([])  # no ETFs
+
+        result = aggregate_portfolio_composition(hld, const_provider, meta_provider)
+        df = result.securities
+
+        asml = df[df["isin"] == "NL0010273215"].iloc[0]
+        assert asml["total_weight_pct"] == pytest.approx(4000 / 5000 * 100, abs=1e-4)
+        assert asml["direct_weight_pct"] == pytest.approx(4000 / 5000 * 100, abs=1e-4)
+        assert asml["etf_weight_pct"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_etf_constituents_expand_into_look_through_rows(self):
+        from portfolio_sim import aggregate_portfolio_composition
+
+        # Portfolio: €10000 ASML direct + €20000 ETF (ETF is 10% ASML, 90% covered)
+        hld = _holdings_df(
+            [
+                {"isin": "NL0010273215", "quantity": 25, "price": 400.0},  # €10000 direct
+                {"isin": "IE00ETF00001", "quantity": 100, "price": 200.0},  # €20000 ETF
+            ]
+        )
+        etf_result = ConstituentResult(
+            etf_isin="IE00ETF00001",
+            constituents=[
+                ConstituentRow(isin="NL0010273215", ticker=None, name="ASML", weight=0.10),
+                ConstituentRow(isin="US0378331005", ticker=None, name="Apple", weight=0.80),
+            ],
+            coverage_pct=0.90,
+            as_of="2025-12-31",
+            source="csv",
+        )
+        meta_provider = _make_stub_metadata_provider(
+            [
+                _meta("NL0010273215"),
+                _meta("US0378331005"),
+                _meta("IE00ETF00001", etf_structure="accumulating"),
+            ]
+        )
+        const_provider = _make_stub_constituent_provider([etf_result])
+
+        result = aggregate_portfolio_composition(hld, const_provider, meta_provider)
+        df = result.securities
+
+        total_portfolio = 10000 + 20000  # €30000
+        asml = df[df["isin"] == "NL0010273215"].iloc[0]
+        # direct: €10000; via ETF: €20000 * 10% = €2000; total: €12000
+        assert asml["direct_weight_pct"] == pytest.approx(10000 / total_portfolio * 100, abs=1e-4)
+        assert asml["etf_weight_pct"] == pytest.approx(2000 / total_portfolio * 100, abs=1e-4)
+        assert asml["total_weight_pct"] == pytest.approx(12000 / total_portfolio * 100, abs=1e-4)
+
+    def test_unresolved_residual_row_for_etf(self):
+        from portfolio_sim import aggregate_portfolio_composition
+
+        # ETF coverage 90% → 10% unresolved
+        hld = _holdings_df(
+            [
+                {"isin": "IE00ETF00001", "quantity": 100, "price": 100.0},  # €10000
+            ]
+        )
+        etf_result = ConstituentResult(
+            etf_isin="IE00ETF00001",
+            constituents=[
+                ConstituentRow(isin="NL0010273215", ticker=None, name="ASML", weight=0.90),
+            ],
+            coverage_pct=0.90,
+            as_of="2025-12-31",
+            source="csv",
+        )
+        meta_provider = _make_stub_metadata_provider(
+            [
+                _meta("NL0010273215"),
+                _meta("IE00ETF00001"),
+            ]
+        )
+        const_provider = _make_stub_constituent_provider([etf_result])
+
+        result = aggregate_portfolio_composition(hld, const_provider, meta_provider)
+        df = result.securities
+
+        unresolved = df[df["isin"] == "_UNRESOLVED_"]
+        assert not unresolved.empty
+        # unresolved weight = €10000 * 10% = €1000 → 10% of portfolio
+        assert unresolved.iloc[0]["total_weight_pct"] == pytest.approx(10.0, abs=1e-4)
+
+    def test_weights_sum_to_100(self):
+        from portfolio_sim import aggregate_portfolio_composition
+
+        hld = _holdings_df(
+            [
+                {"isin": "NL0010273215", "quantity": 10, "price": 400.0},
+                {"isin": "IE00ETF00001", "quantity": 50, "price": 200.0},
+            ]
+        )
+        etf_result = ConstituentResult(
+            etf_isin="IE00ETF00001",
+            constituents=[
+                ConstituentRow(isin="US0378331005", ticker=None, name="Apple", weight=0.80),
+            ],
+            coverage_pct=0.80,
+            as_of="2025-12-31",
+            source="csv",
+        )
+        meta_provider = _make_stub_metadata_provider(
+            [
+                _meta("NL0010273215"),
+                _meta("US0378331005"),
+                _meta("IE00ETF00001"),
+            ]
+        )
+        const_provider = _make_stub_constituent_provider([etf_result])
+
+        result = aggregate_portfolio_composition(hld, const_provider, meta_provider)
+        total = result.securities["total_weight_pct"].sum()
+        assert total == pytest.approx(100.0, abs=1e-3)
+
+    def test_etf_coverage_summary_populated(self):
+        from portfolio_sim import aggregate_portfolio_composition
+
+        hld = _holdings_df(
+            [
+                {"isin": "IE00ETF00001", "quantity": 100, "price": 100.0},
+            ]
+        )
+        etf_result = ConstituentResult(
+            etf_isin="IE00ETF00001",
+            constituents=[
+                ConstituentRow(isin="NL0010273215", ticker=None, name="ASML", weight=0.75),
+            ],
+            coverage_pct=0.75,
+            as_of="2025-12-31",
+            source="csv",
+        )
+        meta_provider = _make_stub_metadata_provider(
+            [
+                _meta("NL0010273215"),
+                _meta("IE00ETF00001"),
+            ]
+        )
+        const_provider = _make_stub_constituent_provider([etf_result])
+
+        result = aggregate_portfolio_composition(hld, const_provider, meta_provider)
+        cov = result.etf_coverage
+
+        assert "IE00ETF00001" in cov["etf_isin"].values
+        row = cov[cov["etf_isin"] == "IE00ETF00001"].iloc[0]
+        assert row["coverage_pct"] == pytest.approx(0.75, abs=1e-4)
+
+    def test_metadata_attached_to_security_rows(self):
+        from portfolio_sim import aggregate_portfolio_composition
+
+        hld = _holdings_df(
+            [
+                {"isin": "NL0010273215", "quantity": 10, "price": 400.0},
+            ]
+        )
+        meta_provider = _make_stub_metadata_provider(
+            [
+                _meta("NL0010273215", sector="Technology", country="Netherlands"),
+            ]
+        )
+        const_provider = _make_stub_constituent_provider([])
+
+        result = aggregate_portfolio_composition(hld, const_provider, meta_provider)
+        row = result.securities[result.securities["isin"] == "NL0010273215"].iloc[0]
+        assert row["sector"] == "Technology"
+        assert row["country"] == "Netherlands"
+
+
+# ── Slice 4: Dimension breakdown functions ────────────────────────────────────
+
+
+def _composition_df(rows: list[dict]) -> pd.DataFrame:
+    """Build a minimal securities DataFrame for breakdown tests."""
+    defaults = {
+        "direct_weight_pct": 0.0,
+        "etf_weight_pct": 0.0,
+        "name": "Test",
+        "sector": None,
+        "industry": None,
+        "country": None,
+        "market_cap_tier": "Large",
+        "beta": 1.0,
+        "etf_structure": "unknown",
+        "etf_domicile": None,
+    }
+    out = []
+    for r in rows:
+        row = {**defaults, **r}
+        if "total_weight_pct" not in r:
+            row["total_weight_pct"] = row["direct_weight_pct"] + row["etf_weight_pct"]
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+class TestBreakdownFunctions:
+    def test_imports(self):
+        from portfolio_sim import (  # noqa: F401
+            breakdown_by_asset_class,
+            breakdown_by_beta_bucket,
+            breakdown_by_country,
+            breakdown_by_currency,
+            breakdown_by_etf_domicile,
+            breakdown_by_etf_structure,
+            breakdown_by_industry,
+            breakdown_by_market_cap_tier,
+            breakdown_by_region,
+            breakdown_by_sector,
+        )
+
+    def test_sector_groups_correctly(self):
+        from portfolio_sim import breakdown_by_sector
+
+        df = _composition_df(
+            [
+                {"isin": "A", "sector": "Technology", "total_weight_pct": 60.0},
+                {"isin": "B", "sector": "Technology", "total_weight_pct": 20.0},
+                {"isin": "C", "sector": "Financials", "total_weight_pct": 20.0},
+            ]
+        )
+        result = breakdown_by_sector(df)
+        tech = result[result["dimension_value"] == "Technology"].iloc[0]
+        assert tech["weight_pct"] == pytest.approx(80.0, abs=1e-4)
+
+    def test_sector_null_labelled_unknown(self):
+        from portfolio_sim import breakdown_by_sector
+
+        df = _composition_df(
+            [
+                {"isin": "A", "sector": None, "total_weight_pct": 100.0},
+            ]
+        )
+        result = breakdown_by_sector(df)
+        assert "Unknown" in result["dimension_value"].values
+
+    def test_region_groups_country_to_continent(self):
+        from portfolio_sim import breakdown_by_region
+
+        df = _composition_df(
+            [
+                {"isin": "A", "country": "Netherlands", "total_weight_pct": 50.0},
+                {"isin": "B", "country": "Germany", "total_weight_pct": 30.0},
+                {"isin": "C", "country": "United States", "total_weight_pct": 20.0},
+            ]
+        )
+        result = breakdown_by_region(df)
+        europe = result[result["dimension_value"] == "Europe"].iloc[0]
+        assert europe["weight_pct"] == pytest.approx(80.0, abs=1e-4)
+
+    def test_market_cap_tier_groups_correctly(self):
+        from portfolio_sim import breakdown_by_market_cap_tier
+
+        df = _composition_df(
+            [
+                {"isin": "A", "market_cap_tier": "Large", "total_weight_pct": 70.0},
+                {"isin": "B", "market_cap_tier": "Small", "total_weight_pct": 30.0},
+            ]
+        )
+        result = breakdown_by_market_cap_tier(df)
+        large = result[result["dimension_value"] == "Large"].iloc[0]
+        assert large["weight_pct"] == pytest.approx(70.0, abs=1e-4)
+
+    def test_beta_bucket_labels_include_benchmark(self):
+        from portfolio_sim import breakdown_by_beta_bucket
+
+        df = _composition_df(
+            [
+                {"isin": "A", "beta": 0.5, "total_weight_pct": 40.0},
+                {"isin": "B", "beta": 1.0, "total_weight_pct": 60.0},
+            ]
+        )
+        result = breakdown_by_beta_bucket(df)
+        labels = result["dimension_value"].tolist()
+        assert any("S&P 500" in lbl for lbl in labels)
+
+    def test_beta_bucket_low_high_market(self):
+        from portfolio_sim import breakdown_by_beta_bucket
+
+        df = _composition_df(
+            [
+                {"isin": "A", "beta": 0.5, "total_weight_pct": 20.0},  # low <0.8
+                {"isin": "B", "beta": 1.0, "total_weight_pct": 50.0},  # market 0.8–1.2
+                {"isin": "C", "beta": 1.5, "total_weight_pct": 30.0},  # high >1.2
+            ]
+        )
+        result = breakdown_by_beta_bucket(df)
+        labels = result["dimension_value"].tolist()
+        assert any("Low" in lbl for lbl in labels)
+        assert any("Market" in lbl for lbl in labels)
+        assert any("High" in lbl for lbl in labels)
+
+    def test_etf_structure_breakdown(self):
+        from portfolio_sim import breakdown_by_etf_structure
+
+        df = _composition_df(
+            [
+                {"isin": "A", "etf_structure": "accumulating", "total_weight_pct": 60.0},
+                {"isin": "B", "etf_structure": "distributing", "total_weight_pct": 40.0},
+            ]
+        )
+        result = breakdown_by_etf_structure(df)
+        acc = result[result["dimension_value"] == "accumulating"].iloc[0]
+        assert acc["weight_pct"] == pytest.approx(60.0, abs=1e-4)
+
+    def test_etf_domicile_breakdown(self):
+        from portfolio_sim import breakdown_by_etf_domicile
+
+        df = _composition_df(
+            [
+                {"isin": "A", "etf_domicile": "Ireland", "total_weight_pct": 70.0},
+                {"isin": "B", "etf_domicile": "Luxembourg", "total_weight_pct": 30.0},
+            ]
+        )
+        result = breakdown_by_etf_domicile(df)
+        ie = result[result["dimension_value"] == "Ireland"].iloc[0]
+        assert ie["weight_pct"] == pytest.approx(70.0, abs=1e-4)
+
+    def test_currency_breakdown(self):
+        from portfolio_sim import breakdown_by_currency
+
+        # breakdown_by_currency takes holdings_df (not securities_df)
+        hld = pd.DataFrame(
+            [
+                {"isin": "A", "currency": "EUR", "market_value": 6000.0},
+                {"isin": "B", "currency": "USD", "market_value": 4000.0},
+            ]
+        )
+        result = breakdown_by_currency(hld)
+        eur = result[result["dimension_value"] == "EUR"].iloc[0]
+        assert eur["weight_pct"] == pytest.approx(60.0, abs=1e-4)
+
+    def test_asset_class_breakdown(self):
+        from portfolio_sim import breakdown_by_asset_class
+
+        # ISINs with IE prefix → ETF; others → Equity
+        df = _composition_df(
+            [
+                {"isin": "IE00TEST0001", "total_weight_pct": 40.0},
+                {"isin": "NL0010273215", "total_weight_pct": 60.0},
+            ]
+        )
+        result = breakdown_by_asset_class(df)
+        equity = result[result["dimension_value"] == "Equity"].iloc[0]
+        assert equity["weight_pct"] == pytest.approx(60.0, abs=1e-4)
+
+    def test_breakdown_result_has_required_columns(self):
+        from portfolio_sim import breakdown_by_sector
+
+        df = _composition_df([{"isin": "A", "sector": "Technology", "total_weight_pct": 100.0}])
+        result = breakdown_by_sector(df)
+        assert "dimension_value" in result.columns
+        assert "weight_pct" in result.columns
+
+
+# ── Slice 5: portfolio_composition script smoke test ──────────────────────────
+
+
+class TestPortfolioCompositionScript:
+    def test_script_runs_with_synthetic_holdings(self, tmp_path):
+        """Smoke test: script accepts a holdings CSV and writes output files."""
+        import subprocess
+        import sys
+
+        # Write a minimal synthetic holdings CSV
+        holdings_csv = tmp_path / "holdings.csv"
+        holdings_csv.write_text(
+            "date,isin,wkn,asset_name,quantity,price,currency,market_value,jurisdiction\n"
+            "2025-12-31,NL0010273215,,ASML Holding NV,10,400.0,EUR,4000.0,NL\n"
+            "2025-12-31,US0378331005,,Apple Inc,5,200.0,EUR,1000.0,US\n"
+        )
+        # Write a minimal ticker map
+        ticker_map = tmp_path / "ticker_map.json"
+        ticker_map.write_text('{"NL0010273215": "ASML.AS", "US0378331005": "AAPL"}')
+
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+
+        script = Path(__file__).parent.parent / "scripts" / "portfolio_composition.py"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--holdings",
+                str(holdings_csv),
+                "--ticker-map",
+                str(ticker_map),
+                "--output-dir",
+                str(output_dir),
+                "--no-fetch",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                **__import__("os").environ,
+                "PYTHONPATH": str(Path(__file__).parent.parent / "src"),
+            },
+        )
+        assert result.returncode == 0, f"Script failed:\n{result.stderr}"
+        # Verify output files were written
+        output_files = list(output_dir.glob("*.csv"))
+        assert len(output_files) >= 5, f"Expected at least 5 output files, got {output_files}"

@@ -15,7 +15,12 @@ from __future__ import annotations
 import contextlib
 import csv
 import io
+import json
+import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import date as _date
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
@@ -421,6 +426,871 @@ def make_price_provider(name: str, **kwargs: object) -> PriceProvider:
             fx_provider=kwargs.get("fx_provider"),  # type: ignore[arg-type]
         )
     raise ValueError(f"Unknown price provider: {name!r}. Use 'static' or 'yahoo'.")
+
+
+# ── ETF constituent providers ──────────────────────────────────────────────────
+
+
+@dataclass
+class ConstituentRow:
+    isin: str | None
+    ticker: str | None
+    name: str
+    weight: float  # fraction of ETF total value, 0.0–1.0
+
+
+@dataclass
+class ConstituentResult:
+    etf_isin: str
+    constituents: list[ConstituentRow]
+    coverage_pct: float  # fraction of ETF weight that has resolvable ISINs
+    as_of: str  # ISO date YYYY-MM-DD
+    source: str  # "csv" | "yahoo_top_holdings"
+
+    def is_stale(self, snapshot_date: str) -> bool:
+        """Return True if constituent data is more than 90 days older than snapshot_date."""
+        delta = _date.fromisoformat(snapshot_date) - _date.fromisoformat(self.as_of)
+        return delta.days > 90
+
+
+class ETFConstituentProvider(ABC):
+    @abstractmethod
+    def get_constituents(self, isin: str) -> ConstituentResult:
+        """Return constituent breakdown for the given ETF ISIN.
+
+        Raises KeyError if this provider does not know the ISIN.
+        """
+
+
+# Month abbreviation map for iShares-style dates like "31/Dec/2025"
+_MONTH_ABBR = {
+    "Jan": 1,
+    "Feb": 2,
+    "Mar": 3,
+    "Apr": 4,
+    "May": 5,
+    "Jun": 6,
+    "Jul": 7,
+    "Aug": 8,
+    "Sep": 9,
+    "Oct": 10,
+    "Nov": 11,
+    "Dec": 12,
+}
+
+
+def _parse_ishares_date(raw: str) -> str:
+    """Parse iShares-style date strings to ISO format.
+
+    Handles "31/Dec/2025", "2025-12-31", and "30-Jun-2025".
+    """
+    raw = raw.strip().strip('"')
+    # Try ISO first
+    try:
+        return _date.fromisoformat(raw).isoformat()
+    except ValueError:
+        pass
+    # Try DD/Mon/YYYY or DD-Mon-YYYY
+    m = re.match(r"(\d{1,2})[/-]([A-Za-z]{3})[/-](\d{4})", raw)
+    if m:
+        day, mon_str, year = int(m.group(1)), m.group(2).capitalize(), int(m.group(3))
+        month = _MONTH_ABBR.get(mon_str)
+        if month:
+            return _date(year, month, day).isoformat()
+    raise ValueError(f"Cannot parse date: {raw!r}")
+
+
+class CsvConstituentProvider(ETFConstituentProvider):
+    """Downloads and parses ETF holdings CSVs (iShares, Amundi, Xtrackers, etc.).
+
+    url_map: ISIN → direct CSV download URL (user-maintained, e.g. from
+        data/private/etf_download_urls.json).
+    cache_dir: if given, parsed results are cached as JSON files under
+        cache_dir/<ISIN>.json so repeated runs skip the HTTP download.
+    """
+
+    def __init__(
+        self,
+        url_map: dict[str, str] | None = None,
+        cache_dir: Path | None = None,
+    ) -> None:
+        self._url_map: dict[str, str] = dict(url_map or {})
+        self._cache_dir = cache_dir
+
+    def get_constituents(self, isin: str) -> ConstituentResult:
+        if isin not in self._url_map:
+            raise KeyError(f"No CSV URL configured for ISIN {isin!r}")
+
+        if self._cache_dir is not None:
+            cached = self._load_cache(isin)
+            if cached is not None:
+                return cached
+
+        url = self._url_map[isin]
+        resp = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        result = self._parse_csv(isin, resp.text)
+
+        if self._cache_dir is not None:
+            self._save_cache(isin, result)
+
+        return result
+
+    def _parse_csv(self, etf_isin: str, text: str) -> ConstituentResult:
+        lines = text.splitlines()
+
+        # Find the header row: first row containing both "ISIN" and "Weight"
+        header_idx = None
+        as_of_raw: str | None = None
+        for i, line in enumerate(lines):
+            upper = line.upper()
+            if "ISIN" in upper and "WEIGHT" in upper:
+                header_idx = i
+                break
+            # Look for "as of" date in metadata rows
+            if "HOLDINGS AS OF" in upper or "AS OF" in upper:
+                parts = [p.strip().strip('"') for p in line.split(",")]
+                for part in parts:
+                    if re.search(r"\d{1,2}[/-][A-Za-z]{3}[/-]\d{4}", part) or re.search(
+                        r"\d{4}-\d{2}-\d{2}", part
+                    ):
+                        as_of_raw = part
+                        break
+
+        if header_idx is None:
+            raise ValueError(f"Could not find column header row in CSV for {etf_isin!r}")
+
+        # Parse column headers
+        reader = csv.DictReader(
+            lines[header_idx:],
+            dialect="excel",
+        )
+        reader.fieldnames = [h.strip().strip('"') for h in (reader.fieldnames or [])]
+
+        # Normalise column names to handle minor formatting differences
+        def _find_col(fieldnames: list[str], *candidates: str) -> str | None:
+            for c in candidates:
+                for f in fieldnames:
+                    if c.lower() in f.lower():
+                        return f
+            return None
+
+        fn = list(reader.fieldnames)
+        isin_col = _find_col(fn, "isin")
+        weight_col = _find_col(fn, "weight (%)", "weight(%)", "weight")
+        name_col = _find_col(fn, "name")
+
+        if not isin_col or not weight_col or not name_col:
+            raise ValueError(
+                f"Required columns (Name, ISIN, Weight) not found in CSV for {etf_isin!r}. "
+                f"Found: {fn}"
+            )
+
+        constituents: list[ConstituentRow] = []
+        total_weight = 0.0
+        isin_weight = 0.0
+
+        for row in reader:
+            raw_isin = (row.get(isin_col) or "").strip().strip('"')
+            raw_weight = (row.get(weight_col) or "").strip().strip('"').replace(",", "")
+            raw_name = (row.get(name_col) or "").strip().strip('"')
+
+            if not raw_weight or not raw_name:
+                continue
+            try:
+                w = float(raw_weight) / 100.0  # convert percentage to fraction
+            except ValueError:
+                continue
+
+            total_weight += w
+            if raw_isin:
+                isin_weight += w
+                constituents.append(
+                    ConstituentRow(isin=raw_isin, ticker=None, name=raw_name, weight=w)
+                )
+
+        coverage = isin_weight / total_weight if total_weight > 0 else 0.0
+        as_of = _parse_ishares_date(as_of_raw) if as_of_raw else _date.today().isoformat()
+
+        return ConstituentResult(
+            etf_isin=etf_isin,
+            constituents=constituents,
+            coverage_pct=coverage,
+            as_of=as_of,
+            source="csv",
+        )
+
+    def _cache_path(self, isin: str) -> Path:
+        assert self._cache_dir is not None
+        return self._cache_dir / f"{isin}.json"
+
+    def _load_cache(self, isin: str) -> ConstituentResult | None:
+        path = self._cache_path(isin)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        return ConstituentResult(
+            etf_isin=data["etf_isin"],
+            constituents=[ConstituentRow(**c) for c in data["constituents"]],
+            coverage_pct=data["coverage_pct"],
+            as_of=data["as_of"],
+            source=data["source"],
+        )
+
+    def _save_cache(self, isin: str, result: ConstituentResult) -> None:
+        assert self._cache_dir is not None
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "etf_isin": result.etf_isin,
+            "constituents": [
+                {"isin": c.isin, "ticker": c.ticker, "name": c.name, "weight": c.weight}
+                for c in result.constituents
+            ],
+            "coverage_pct": result.coverage_pct,
+            "as_of": result.as_of,
+            "source": result.source,
+        }
+        self._cache_path(isin).write_text(json.dumps(data, indent=2))
+
+
+class YahooTopHoldingsProvider(ETFConstituentProvider):
+    """Yahoo Finance topHoldings fallback.
+
+    Returns the top ~10–15 holdings from Yahoo's quoteSummary API.
+    Coverage is partial (holdingsPercent field from Yahoo).
+    ISINs are None unless a reverse_ticker_map is provided.
+    """
+
+    _BASE = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+
+    def __init__(
+        self,
+        isin_to_ticker: dict[str, str],
+        reverse_ticker_map: dict[str, str] | None = None,
+    ) -> None:
+        self._map = dict(isin_to_ticker)
+        self._reverse = dict(reverse_ticker_map or {})
+
+    def get_constituents(self, isin: str) -> ConstituentResult:
+        ticker = self._map.get(isin)
+        if not ticker:
+            raise KeyError(f"No ticker mapping for ISIN {isin!r}")
+
+        url = f"{self._BASE}/{ticker}?modules=topHoldings"
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        data = resp.json()
+
+        result_list = data.get("quoteSummary", {}).get("result") or []
+        if not result_list:
+            raise ValueError(f"No topHoldings data returned for ticker {ticker!r}")
+
+        top = result_list[0].get("topHoldings", {})
+        holdings_pct = (top.get("holdingsPercent") or {}).get("raw", 0.0)
+        as_of_raw = (top.get("asOfDate") or {}).get("fmt", _date.today().isoformat())
+        as_of = _parse_ishares_date(as_of_raw)
+
+        constituents: list[ConstituentRow] = []
+        for h in top.get("holdings", []):
+            sym = (h.get("symbol") or "").strip()
+            name = (h.get("holdingName") or "").strip()
+            w = (h.get("holdingPercent") or {}).get("raw", 0.0)
+            resolved_isin = self._reverse.get(sym)
+            constituents.append(ConstituentRow(isin=resolved_isin, ticker=sym, name=name, weight=w))
+
+        return ConstituentResult(
+            etf_isin=isin,
+            constituents=constituents,
+            coverage_pct=holdings_pct,
+            as_of=as_of,
+            source="yahoo_top_holdings",
+        )
+
+
+class ChainedConstituentProvider(ETFConstituentProvider):
+    """Try providers in order and return the first successful result.
+
+    Raises KeyError if all providers fail for the given ISIN.
+    """
+
+    def __init__(self, providers: list[ETFConstituentProvider]) -> None:
+        self._providers = list(providers)
+
+    def get_constituents(self, isin: str) -> ConstituentResult:
+        last_exc: Exception = KeyError(isin)
+        for provider in self._providers:
+            try:
+                return provider.get_constituents(isin)
+            except (KeyError, ValueError) as exc:
+                last_exc = exc
+        raise KeyError(isin) from last_exc
+
+
+# ── Security metadata provider ─────────────────────────────────────────────────
+
+# ISIN country prefix → human-readable domicile name
+_ISIN_DOMICILE: dict[str, str] = {
+    "IE": "Ireland",
+    "LU": "Luxembourg",
+    "DE": "Germany",
+    "FR": "France",
+    "NL": "Netherlands",
+    "GB": "United Kingdom",
+    "US": "United States",
+    "CH": "Switzerland",
+    "SE": "Sweden",
+    "DK": "Denmark",
+    "FI": "Finland",
+    "NO": "Norway",
+    "AT": "Austria",
+    "BE": "Belgium",
+    "ES": "Spain",
+    "IT": "Italy",
+}
+
+# Market cap tier thresholds in EUR
+_LARGE_CAP_EUR = 10_000_000_000
+_MID_CAP_EUR = 2_000_000_000
+
+
+@dataclass
+class SecurityMetadata:
+    isin: str
+    ticker: str | None
+    sector: str | None
+    industry: str | None
+    country: str | None
+    market_cap_eur: float | None
+    market_cap_tier: str  # "Large" | "Mid" | "Small" | "Unknown"
+    beta: float | None
+    etf_structure: str  # "accumulating" | "distributing" | "unknown"
+    etf_domicile: str | None  # derived from ISIN prefix
+
+
+class _YahooTickerCache:
+    """In-memory cache of raw Yahoo quoteSummary responses, keyed by ticker.
+
+    Shared across provider instances in the same Python session so each
+    ticker is fetched at most once per run.  Metadata fields (sector, beta,
+    etc.) change slowly and are safe to cache for a session.  Price data
+    is NOT stored here — the price provider always fetches live.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, dict] = {}
+
+    def get(self, ticker: str) -> dict | None:
+        return self._store.get(ticker)
+
+    def set(self, ticker: str, data: dict) -> None:
+        self._store[ticker] = data
+
+
+# Module-level default cache — shared within a single Python process.
+_default_ticker_cache = _YahooTickerCache()
+
+_YAHOO_SUMMARY_BASE = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+_SUMMARY_MODULES = "assetProfile,defaultKeyStatistics,summaryDetail,price"
+
+
+class YahooFinanceMetadataProvider:
+    """Fetches security metadata from Yahoo Finance.
+
+    Returns sector, industry, country, market cap tier, beta, ETF structure,
+    and ETF domicile for each ISIN.  Results are persisted to a sidecar JSON
+    cache file so repeated runs skip the network call.
+
+    etf_structure_overrides: explicit ISIN → "accumulating"/"distributing" map.
+        Takes precedence over the name heuristic.
+    ticker_cache: optional shared _YahooTickerCache for cross-provider dedup.
+        Defaults to the module-level cache.
+    """
+
+    def __init__(
+        self,
+        isin_to_ticker: dict[str, str],
+        cache_path: Path | None = None,
+        etf_structure_overrides: dict[str, str] | None = None,
+        ticker_cache: _YahooTickerCache | None = None,
+    ) -> None:
+        self._map = dict(isin_to_ticker)
+        self._cache_path = cache_path
+        self._overrides = dict(etf_structure_overrides or {})
+        self._ticker_cache = ticker_cache if ticker_cache is not None else _default_ticker_cache
+        self._disk_cache: dict[str, dict] = self._load_disk_cache()
+
+    def get_metadata(self, isin: str) -> SecurityMetadata:
+        ticker = self._map.get(isin)
+        if not ticker:
+            raise KeyError(f"No ticker mapping for ISIN {isin!r}")
+
+        if isin in self._disk_cache:
+            return self._from_dict(self._disk_cache[isin])
+
+        raw = self._ticker_cache.get(ticker)
+        if raw is None:
+            url = f"{_YAHOO_SUMMARY_BASE}/{ticker}?modules={_SUMMARY_MODULES}"
+            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            data = resp.json()
+            result_list = (data.get("quoteSummary") or {}).get("result") or []
+            if not result_list:
+                raise ValueError(f"No quoteSummary data for ticker {ticker!r}")
+            raw = result_list[0]
+            self._ticker_cache.set(ticker, raw)
+
+        meta = self._extract(isin, ticker, raw)
+        self._disk_cache[isin] = self._to_dict(meta)
+        self._save_disk_cache()
+        return meta
+
+    def _extract(self, isin: str, ticker: str, raw: dict) -> SecurityMetadata:
+        profile = raw.get("assetProfile") or {}
+        stats = raw.get("defaultKeyStatistics") or {}
+        summary = raw.get("summaryDetail") or {}
+        price_info = raw.get("price") or {}
+
+        sector = profile.get("sector") or None
+        industry = profile.get("industry") or None
+        country = profile.get("country") or None
+
+        beta_raw = (stats.get("beta") or {}).get("raw")
+        beta = float(beta_raw) if beta_raw is not None else None
+
+        market_cap_raw = (summary.get("marketCap") or {}).get("raw")
+        market_cap_eur = float(market_cap_raw) if market_cap_raw is not None else None
+        market_cap_tier = _classify_market_cap(market_cap_eur)
+
+        etf_domicile = _ISIN_DOMICILE.get(isin[:2].upper())
+
+        etf_structure = self._resolve_etf_structure(isin, price_info)
+
+        return SecurityMetadata(
+            isin=isin,
+            ticker=ticker,
+            sector=sector,
+            industry=industry,
+            country=country,
+            market_cap_eur=market_cap_eur,
+            market_cap_tier=market_cap_tier,
+            beta=beta,
+            etf_structure=etf_structure,
+            etf_domicile=etf_domicile,
+        )
+
+    def _resolve_etf_structure(self, isin: str, price_info: dict) -> str:
+        if isin in self._overrides:
+            return self._overrides[isin]
+        long_name = (price_info.get("longName") or "").lower()
+        if "(acc)" in long_name or " acc " in long_name or long_name.endswith(" acc"):
+            return "accumulating"
+        if "(dist)" in long_name or "(dis)" in long_name or " dist " in long_name:
+            return "distributing"
+        return "unknown"
+
+    def _load_disk_cache(self) -> dict[str, dict]:
+        if self._cache_path and Path(self._cache_path).exists():
+            return json.loads(Path(self._cache_path).read_text())
+        return {}
+
+    def _save_disk_cache(self) -> None:
+        if self._cache_path:
+            Path(self._cache_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(self._cache_path).write_text(json.dumps(self._disk_cache, indent=2))
+
+    @staticmethod
+    def _to_dict(meta: SecurityMetadata) -> dict:
+        return {
+            "isin": meta.isin,
+            "ticker": meta.ticker,
+            "sector": meta.sector,
+            "industry": meta.industry,
+            "country": meta.country,
+            "market_cap_eur": meta.market_cap_eur,
+            "market_cap_tier": meta.market_cap_tier,
+            "beta": meta.beta,
+            "etf_structure": meta.etf_structure,
+            "etf_domicile": meta.etf_domicile,
+        }
+
+    @staticmethod
+    def _from_dict(d: dict) -> SecurityMetadata:
+        return SecurityMetadata(**d)
+
+
+def _classify_market_cap(market_cap_eur: float | None) -> str:
+    if market_cap_eur is None:
+        return "Unknown"
+    if market_cap_eur >= _LARGE_CAP_EUR:
+        return "Large"
+    if market_cap_eur >= _MID_CAP_EUR:
+        return "Mid"
+    return "Small"
+
+
+# ── Portfolio composition aggregation ──────────────────────────────────────────
+
+_UNRESOLVED_ISIN = "_UNRESOLVED_"
+
+# Columns present in CompositionResult.securities DataFrame
+COMPOSITION_SECURITY_COLUMNS: list[str] = [
+    "isin",
+    "name",
+    "direct_weight_pct",
+    "etf_weight_pct",
+    "total_weight_pct",
+    "sector",
+    "industry",
+    "country",
+    "market_cap_tier",
+    "beta",
+    "etf_structure",
+    "etf_domicile",
+]
+
+# Columns present in CompositionResult.etf_coverage DataFrame
+COMPOSITION_COVERAGE_COLUMNS: list[str] = [
+    "etf_isin",
+    "coverage_pct",
+    "as_of",
+    "source",
+    "is_stale",
+]
+
+
+@dataclass
+class CompositionResult:
+    securities: pd.DataFrame  # COMPOSITION_SECURITY_COLUMNS schema
+    etf_coverage: pd.DataFrame  # COMPOSITION_COVERAGE_COLUMNS schema
+    snapshot_date: str
+
+
+def aggregate_portfolio_composition(
+    holdings_df: pd.DataFrame,
+    constituent_provider: ETFConstituentProvider,
+    metadata_provider: YahooFinanceMetadataProvider,
+    snapshot_date: str | None = None,
+) -> CompositionResult:
+    """Aggregate portfolio holdings into a look-through composition view.
+
+    Expands ETF holdings into their constituent securities, sums direct and
+    ETF-derived weights per ISIN, and attaches metadata (sector, country, etc.).
+    Rows without a resolvable ISIN contribute to the '_UNRESOLVED_' residual row.
+
+    holdings_df must contain: isin, market_value columns (in EUR).
+    snapshot_date is used for ETF constituent staleness checks.
+    """
+    if snapshot_date is None:
+        snapshot_date = _date.today().isoformat()
+
+    total_portfolio_eur = holdings_df["market_value"].sum()
+    if total_portfolio_eur == 0:
+        return CompositionResult(
+            securities=pd.DataFrame(columns=COMPOSITION_SECURITY_COLUMNS),
+            etf_coverage=pd.DataFrame(columns=COMPOSITION_COVERAGE_COLUMNS),
+            snapshot_date=snapshot_date,
+        )
+
+    # Per-ISIN accumulators: {isin: {"direct_eur": float, "etf_eur": float, "name": str}}
+    buckets: dict[str, dict] = {}
+    unresolved_eur = 0.0
+    coverage_rows: list[dict] = []
+
+    def _ensure(isin: str, name: str = "") -> None:
+        if isin not in buckets:
+            buckets[isin] = {"direct_eur": 0.0, "etf_eur": 0.0, "name": name}
+
+    for _, row in holdings_df.iterrows():
+        isin = str(row["isin"])
+        mv_eur = float(row["market_value"])
+        name = str(row.get("asset_name", isin))
+
+        # Try to expand as ETF
+        try:
+            constituents_result = constituent_provider.get_constituents(isin)
+        except (KeyError, ValueError):
+            # Not an ETF or no constituent data — treat as direct holding
+            _ensure(isin, name)
+            buckets[isin]["direct_eur"] += mv_eur
+            continue
+
+        # Record coverage info
+        coverage_rows.append(
+            {
+                "etf_isin": isin,
+                "coverage_pct": constituents_result.coverage_pct,
+                "as_of": constituents_result.as_of,
+                "source": constituents_result.source,
+                "is_stale": constituents_result.is_stale(snapshot_date),
+            }
+        )
+
+        # Expand constituents
+        for c in constituents_result.constituents:
+            if c.isin:
+                _ensure(c.isin, c.name)
+                buckets[c.isin]["etf_eur"] += mv_eur * c.weight
+                if not buckets[c.isin]["name"]:
+                    buckets[c.isin]["name"] = c.name
+            else:
+                unresolved_eur += mv_eur * c.weight
+
+        # Unresolved residual for this ETF
+        unresolved_eur += mv_eur * (1.0 - constituents_result.coverage_pct)
+
+    # Add global unresolved row
+    if unresolved_eur > 0:
+        _ensure(_UNRESOLVED_ISIN, "Unresolved / other")
+        buckets[_UNRESOLVED_ISIN]["etf_eur"] += unresolved_eur
+
+    # Build securities DataFrame
+    security_rows = []
+    for isin, acc in buckets.items():
+        direct_pct = acc["direct_eur"] / total_portfolio_eur * 100.0
+        etf_pct = acc["etf_eur"] / total_portfolio_eur * 100.0
+        total_pct = direct_pct + etf_pct
+
+        meta_kwargs: dict = {
+            "sector": None,
+            "industry": None,
+            "country": None,
+            "market_cap_tier": "Unknown",
+            "beta": None,
+            "etf_structure": "unknown",
+            "etf_domicile": None,
+        }
+        if isin != _UNRESOLVED_ISIN:
+            with contextlib.suppress(KeyError, ValueError):
+                meta = metadata_provider.get_metadata(isin)
+                meta_kwargs = {
+                    "sector": meta.sector,
+                    "industry": meta.industry,
+                    "country": meta.country,
+                    "market_cap_tier": meta.market_cap_tier,
+                    "beta": meta.beta,
+                    "etf_structure": meta.etf_structure,
+                    "etf_domicile": meta.etf_domicile,
+                }
+
+        security_rows.append(
+            {
+                "isin": isin,
+                "name": acc["name"],
+                "direct_weight_pct": round(direct_pct, 4),
+                "etf_weight_pct": round(etf_pct, 4),
+                "total_weight_pct": round(total_pct, 4),
+                **meta_kwargs,
+            }
+        )
+
+    securities_df = (
+        pd.DataFrame(security_rows, columns=COMPOSITION_SECURITY_COLUMNS)
+        .sort_values("total_weight_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    coverage_df = (
+        pd.DataFrame(coverage_rows, columns=COMPOSITION_COVERAGE_COLUMNS)
+        if coverage_rows
+        else pd.DataFrame(columns=COMPOSITION_COVERAGE_COLUMNS)
+    )
+
+    return CompositionResult(
+        securities=securities_df,
+        etf_coverage=coverage_df,
+        snapshot_date=snapshot_date,
+    )
+
+
+# ── Dimension breakdown functions ──────────────────────────────────────────────
+
+# Country → geographic region mapping (continent-level)
+_COUNTRY_TO_REGION: dict[str, str] = {
+    # North America
+    "United States": "North America",
+    "Canada": "North America",
+    "Mexico": "North America",
+    # Europe
+    "Netherlands": "Europe",
+    "Germany": "Europe",
+    "France": "Europe",
+    "United Kingdom": "Europe",
+    "Switzerland": "Europe",
+    "Sweden": "Europe",
+    "Denmark": "Europe",
+    "Finland": "Europe",
+    "Norway": "Europe",
+    "Spain": "Europe",
+    "Italy": "Europe",
+    "Belgium": "Europe",
+    "Austria": "Europe",
+    "Ireland": "Europe",
+    "Luxembourg": "Europe",
+    "Portugal": "Europe",
+    "Poland": "Europe",
+    "Czech Republic": "Europe",
+    "Hungary": "Europe",
+    "Romania": "Europe",
+    "Greece": "Europe",
+    # Asia-Pacific
+    "Japan": "Asia-Pacific",
+    "China": "Asia-Pacific",
+    "South Korea": "Asia-Pacific",
+    "Taiwan": "Asia-Pacific",
+    "India": "Asia-Pacific",
+    "Australia": "Asia-Pacific",
+    "New Zealand": "Asia-Pacific",
+    "Hong Kong": "Asia-Pacific",
+    "Singapore": "Asia-Pacific",
+    "Indonesia": "Asia-Pacific",
+    "Thailand": "Asia-Pacific",
+    "Malaysia": "Asia-Pacific",
+    "Philippines": "Asia-Pacific",
+    # Emerging / Other
+    "Brazil": "Other",
+    "South Africa": "Other",
+    "Saudi Arabia": "Other",
+    "United Arab Emirates": "Other",
+    "Israel": "Other",
+}
+
+# ETF ISIN prefixes that indicate fund wrappers
+_ETF_ISIN_PREFIXES: frozenset[str] = frozenset({"IE", "LU", "FR", "DE00ETF"})
+
+
+def _group_by_dimension(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Sum total_weight_pct by a dimension column, filling None with 'Unknown'."""
+    working = df.copy()
+    working[col] = working[col].fillna("Unknown").replace("", "Unknown")
+    result = (
+        working.groupby(col, as_index=False)["total_weight_pct"]
+        .sum()
+        .rename(columns={col: "dimension_value", "total_weight_pct": "weight_pct"})
+        .sort_values("weight_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+    return result
+
+
+def breakdown_by_sector(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by sector.  None → 'Unknown'."""
+    return _group_by_dimension(securities_df, "sector")
+
+
+def breakdown_by_industry(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by industry.  None → 'Unknown'."""
+    return _group_by_dimension(securities_df, "industry")
+
+
+def breakdown_by_country(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by country.  None → 'Unknown'."""
+    return _group_by_dimension(securities_df, "country")
+
+
+def breakdown_by_region(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by geographic region (continent-level)."""
+    working = securities_df.copy()
+    working["region"] = working["country"].map(_COUNTRY_TO_REGION).fillna("Other")
+    return (
+        working.groupby("region", as_index=False)["total_weight_pct"]
+        .sum()
+        .rename(columns={"region": "dimension_value", "total_weight_pct": "weight_pct"})
+        .sort_values("weight_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def breakdown_by_currency(holdings_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate holdings market_value by currency, expressed as portfolio weight %.
+
+    Takes the raw holdings DataFrame (not the securities DataFrame) since currency
+    is a property of the holding itself, not the underlying security.
+    """
+    total = holdings_df["market_value"].sum()
+    if total == 0:
+        return pd.DataFrame(columns=["dimension_value", "weight_pct"])
+    result = (
+        holdings_df.groupby("currency", as_index=False)["market_value"]
+        .sum()
+        .rename(columns={"currency": "dimension_value", "market_value": "weight_pct"})
+    )
+    result["weight_pct"] = result["weight_pct"] / total * 100.0
+    return result.sort_values("weight_pct", ascending=False).reset_index(drop=True)
+
+
+def _classify_asset_class(isin: str) -> str:
+    """Heuristic: ISINs starting with known ETF country prefixes are 'ETF'; else 'Equity'."""
+    prefix2 = isin[:2].upper()
+    if isin == _UNRESOLVED_ISIN:
+        return "Unresolved"
+    if prefix2 in {"IE", "LU"} or isin.startswith("DE000ETF"):
+        return "ETF"
+    return "Equity"
+
+
+def breakdown_by_asset_class(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by asset class (Equity / ETF / Unresolved)."""
+    working = securities_df.copy()
+    working["asset_class"] = working["isin"].apply(_classify_asset_class)
+    return (
+        working.groupby("asset_class", as_index=False)["total_weight_pct"]
+        .sum()
+        .rename(columns={"asset_class": "dimension_value", "total_weight_pct": "weight_pct"})
+        .sort_values("weight_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def breakdown_by_market_cap_tier(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by market cap tier (Large / Mid / Small / Unknown)."""
+    return _group_by_dimension(securities_df, "market_cap_tier")
+
+
+# Beta bucket boundaries
+_BETA_LOW = 0.8
+_BETA_HIGH = 1.2
+_BETA_LOW_LABEL = f"Low beta (<{_BETA_LOW}, vs S&P 500 (yfinance))"
+_BETA_MARKET_LABEL = f"Market beta ({_BETA_LOW}–{_BETA_HIGH}, vs S&P 500 (yfinance))"
+_BETA_HIGH_LABEL = f"High beta (>{_BETA_HIGH}, vs S&P 500 (yfinance))"
+_BETA_UNKNOWN_LABEL = "Unknown beta"
+
+
+def _beta_bucket(beta: float | None) -> str:
+    if beta is None:
+        return _BETA_UNKNOWN_LABEL
+    if beta < _BETA_LOW:
+        return _BETA_LOW_LABEL
+    if beta <= _BETA_HIGH:
+        return _BETA_MARKET_LABEL
+    return _BETA_HIGH_LABEL
+
+
+def breakdown_by_beta_bucket(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by beta bucket vs S&P 500 (yfinance).
+
+    Buckets: Low (<0.8), Market (0.8–1.2), High (>1.2), Unknown.
+    All bucket labels include 'vs S&P 500 (yfinance)' as a reminder of the
+    benchmark used.
+    """
+    working = securities_df.copy()
+    working["beta_bucket"] = working["beta"].apply(_beta_bucket)
+    return (
+        working.groupby("beta_bucket", as_index=False)["total_weight_pct"]
+        .sum()
+        .rename(columns={"beta_bucket": "dimension_value", "total_weight_pct": "weight_pct"})
+        .sort_values("weight_pct", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def breakdown_by_etf_structure(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by ETF structure (accumulating / distributing / unknown)."""
+    return _group_by_dimension(securities_df, "etf_structure")
+
+
+def breakdown_by_etf_domicile(securities_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate total_weight_pct by ETF domicile (Ireland / Luxembourg / etc.)."""
+    return _group_by_dimension(securities_df, "etf_domicile")
 
 
 def fetch_current_prices(
