@@ -12,18 +12,24 @@ Usage (inside Docker):
         --ticker-map data/private/ticker_map.json \\
         --tax-rate 0.26375
 
+    # Or set environment variables and omit the flags:
+    source .env.private
+    python scripts/portfolio_snapshot.py
+
 ticker-map is a JSON object mapping ISIN → Yahoo Finance ticker symbol, e.g.:
     { "US00SYNTH004": "SYND", "DE00SYNTH001": "SYNA.DE" }
 
 Use `data/private/ticker_map.json` for your real local map; it is gitignored. The
 committed synthetic example is `data/examples/ticker_map_synthetic.json`.
 ISINs without a ticker mapping are reported but excluded from live pricing.
+See .env.private.example for the full list of environment variables.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date as _date
 from pathlib import Path
@@ -105,13 +111,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--pdf",
-        required=True,
-        help="Path to the Deutsche Bank PDF report",
+        default=os.environ.get("DB_PDF_PATH"),
+        help="Path to the Deutsche Bank PDF report (default: $DB_PDF_PATH)",
     )
     parser.add_argument(
         "--ticker-map",
-        default=None,
-        help="Path to a JSON file mapping ISIN → Yahoo Finance ticker",
+        default=os.environ.get("TICKER_MAP_PATH"),
+        help="Path to a JSON file mapping ISIN → Yahoo Finance ticker (default: $TICKER_MAP_PATH)",
     )
     parser.add_argument(
         "--tax-rate",
@@ -130,6 +136,12 @@ def main() -> None:
         help="ISO date for the report (default: today)",
     )
     args = parser.parse_args()
+
+    if args.pdf is None:
+        parser.error(
+            "--pdf is required (or set DB_PDF_PATH).\n"
+            "See .env.private.example for the full list of environment variables."
+        )
 
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():

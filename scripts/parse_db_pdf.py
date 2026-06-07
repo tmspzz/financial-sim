@@ -11,14 +11,20 @@ Usage (inside Docker):
         --input /path/to/deutsche-bank-report.pdf \\
         --output-dir /path/to/output-dir
 
+    # Or set DB_PDF_PATH in the environment and omit --input:
+    source .env.private
+    python scripts/parse_db_pdf.py --output-dir data/private/
+
 Output files are written to <output-dir>/<pdf-stem>_{transactions,holdings}.{csv,parquet}.
 
 Real data (input PDF and outputs) must live under data/private/ which is gitignored.
+See .env.private.example for the full list of environment variables.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -32,13 +38,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Parse a Deutsche Bank PDF report into canonical CSV and Parquet files"
     )
-    parser.add_argument("--input", required=True, help="Path to the Deutsche Bank PDF report")
+    parser.add_argument(
+        "--input",
+        default=os.environ.get("DB_PDF_PATH"),
+        help="Path to the Deutsche Bank PDF report (default: $DB_PDF_PATH)",
+    )
     parser.add_argument(
         "--output-dir",
         required=True,
         help="Directory where output files are written",
     )
     args = parser.parse_args()
+
+    if args.input is None:
+        parser.error(
+            "--input is required (or set DB_PDF_PATH).\n"
+            "See .env.private.example for the full list of environment variables."
+        )
 
     pdf_path = Path(args.input)
     if not pdf_path.exists():

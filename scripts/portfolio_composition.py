@@ -14,23 +14,33 @@ Usage (inside Docker):
         --output-dir data/private/composition \\
         --snapshot-date 2025-12-31
 
+    # Or set environment variables and omit the flags:
+    source .env.private
+    python scripts/portfolio_composition.py --output-dir data/private/composition
+
 Options:
     --holdings PATH       Holdings CSV or Parquet (HOLDINGS_COLUMNS schema).
+                          Default: $HOLDINGS_PATH.
     --ticker-map PATH     JSON mapping ISIN → Yahoo Finance ticker.
-    --etf-urls PATH       JSON mapping ETF ISIN → CSV download URL (optional).
-    --etf-overrides PATH  JSON mapping ETF ISIN → "accumulating"/"distributing" (optional).
+                          Default: $TICKER_MAP_PATH.
+    --etf-urls PATH       JSON mapping ETF ISIN → CSV download URL.
+                          Default: $ETF_URLS_PATH.
+    --etf-overrides PATH  JSON mapping ETF ISIN → "accumulating"/"distributing".
+                          Default: $ETF_OVERRIDES_PATH.
     --output-dir PATH     Directory for output CSVs (created if absent).
-    --snapshot-date DATE  ISO date for the holdings snapshot (default: today).
+    --snapshot-date DATE  ISO date for the holdings snapshot (default: $SNAPSHOT_DATE or today).
     --no-fetch            Skip live Yahoo metadata fetches; use broker prices only.
-                          Useful for offline/CI runs.
-    --coverage-warn PCT   Warn when ETF constituent coverage is below this
-                          percentage (default: 80).
+    --coverage-warn PCT   Warn when ETF constituent coverage is below this percentage (default: 80).
+
+See .env.private.example for the full list of environment variables.
+See .env.example for a synthetic example that works without real portfolio data.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date as _date
 from pathlib import Path
@@ -99,15 +109,48 @@ class _NullConstituentProvider:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Portfolio composition with ETF look-through.")
-    parser.add_argument("--holdings", required=True, type=Path)
-    parser.add_argument("--ticker-map", type=Path, default=None)
-    parser.add_argument("--etf-urls", type=Path, default=None)
-    parser.add_argument("--etf-overrides", type=Path, default=None)
+    parser.add_argument(
+        "--holdings",
+        type=Path,
+        default=Path(os.environ["HOLDINGS_PATH"]) if os.environ.get("HOLDINGS_PATH") else None,
+        help="Holdings CSV or Parquet (default: $HOLDINGS_PATH)",
+    )
+    parser.add_argument(
+        "--ticker-map",
+        type=Path,
+        default=Path(os.environ["TICKER_MAP_PATH"]) if os.environ.get("TICKER_MAP_PATH") else None,
+        help="JSON ISIN → Yahoo ticker (default: $TICKER_MAP_PATH)",
+    )
+    parser.add_argument(
+        "--etf-urls",
+        type=Path,
+        default=Path(os.environ["ETF_URLS_PATH"]) if os.environ.get("ETF_URLS_PATH") else None,
+        help="JSON ETF ISIN → CSV URL (default: $ETF_URLS_PATH)",
+    )
+    parser.add_argument(
+        "--etf-overrides",
+        type=Path,
+        default=Path(os.environ["ETF_OVERRIDES_PATH"])
+        if os.environ.get("ETF_OVERRIDES_PATH")
+        else None,
+        help="JSON ETF ISIN → acc/dist override (default: $ETF_OVERRIDES_PATH)",
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--snapshot-date", default=_date.today().isoformat())
+    parser.add_argument(
+        "--snapshot-date",
+        default=os.environ.get("SNAPSHOT_DATE", _date.today().isoformat()),
+        help="ISO date for staleness checks (default: $SNAPSHOT_DATE or today)",
+    )
     parser.add_argument("--no-fetch", action="store_true")
     parser.add_argument("--coverage-warn", type=float, default=80.0)
     args = parser.parse_args()
+
+    if args.holdings is None:
+        parser.error(
+            "--holdings is required (or set HOLDINGS_PATH).\n"
+            "See .env.private.example for the full list of environment variables.\n"
+            "See .env.example for a synthetic example that works without real portfolio data."
+        )
 
     holdings_df = _load_holdings(args.holdings)
     ticker_map: dict[str, str] = _load_json(args.ticker_map)

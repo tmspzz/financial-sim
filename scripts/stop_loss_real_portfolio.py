@@ -26,14 +26,20 @@ Usage (inside Docker):
         --static-prices /path/to/prices.json \\
         --tax-rate 0.26375
 
+    # Or set environment variables and omit the flags:
+    source .env.private
+    python scripts/stop_loss_real_portfolio.py
+
 Use `data/private/ticker_map.json` for your real local map; it is gitignored. The
 committed synthetic example is `data/examples/ticker_map_synthetic.json`.
+See .env.private.example for the full list of environment variables.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date as _date
 from pathlib import Path
@@ -186,8 +192,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Stop-loss/re-entry analysis on a real DB portfolio"
     )
-    parser.add_argument("--pdf", required=True, help="Path to the Deutsche Bank PDF report")
-    parser.add_argument("--ticker-map", default=None, help="JSON file mapping ISIN → Yahoo ticker")
+    parser.add_argument(
+        "--pdf",
+        default=os.environ.get("DB_PDF_PATH"),
+        help="Path to the Deutsche Bank PDF report (default: $DB_PDF_PATH)",
+    )
+    parser.add_argument(
+        "--ticker-map",
+        default=os.environ.get("TICKER_MAP_PATH"),
+        help="JSON file mapping ISIN → Yahoo ticker (default: $TICKER_MAP_PATH)",
+    )
     parser.add_argument(
         "--tax-rate", type=float, default=0.26375, help="Flat capital-gains tax rate"
     )
@@ -217,6 +231,12 @@ def main() -> None:
         "--reporting-date", default=None, help="ISO date for the report (default: today)"
     )
     args = parser.parse_args()
+
+    if args.pdf is None:
+        parser.error(
+            "--pdf is required (or set DB_PDF_PATH).\n"
+            "See .env.private.example for the full list of environment variables."
+        )
 
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():

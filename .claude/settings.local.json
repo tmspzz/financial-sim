@@ -3,22 +3,6 @@
     "allow": [
       "Skill(code-review)",
       "Skill(code-review:*)",
-      "Bash(cat *)",
-      "Bash(docker *)",
-      "Bash(find *)",
-      "Bash(git *)",
-      "Bash(grep *)",
-      "Bash(head *)",
-      "Bash(ls *)",
-      "Bash(pytest*)",
-      "Bash(rg *)",
-      "Bash(rtk *)",
-      "Bash(ruff *)",
-      "Bash(sed *)",
-      "Bash(sh *)",
-      "Bash(tail *)",
-      "Bash(tee *)",
-      "Bash(wc *)",
       "WebSearch(*)"
     ]
   }

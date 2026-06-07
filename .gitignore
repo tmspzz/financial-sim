@@ -33,6 +33,7 @@ data/private/
 .env
 .env.*
 !.env.example
+!.env.private.example
 
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
