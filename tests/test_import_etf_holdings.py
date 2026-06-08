@@ -466,7 +466,7 @@ class TestValidateIsin:
         assert m._validate_isin("US1234") is None
 
 
-# ── ISIN supplement for yfinance failures ─────────────────────────────────────
+# ── ISIN supplement and Yahoo resolution ──────────────────────────────────────
 
 
 class TestIsInSupplement:
@@ -480,63 +480,27 @@ class TestIsInSupplement:
         for ticker, isin in m._NASDAQ100_ISIN_SUPPLEMENT.items():
             assert m._validate_isin(isin) == isin, f"{ticker}: {isin!r} is not a valid ISIN"
 
-    def test_resolve_isins_uses_supplement_when_yfinance_returns_dash(self, monkeypatch):
-        """When yfinance returns '-', resolve_isins should fall back to supplement."""
-        import sys
-
-        scripts_dir = str(Path(__file__).parent.parent / "scripts")
-        if scripts_dir not in sys.path:
-            monkeypatch.syspath_prepend(scripts_dir)
+    def test_resolve_isins_uses_supplement_when_yahoo_returns_none(self, monkeypatch):
+        """When yahoo_isin_from_ticker returns None, resolve_isins falls back to supplement."""
         m = _import_module()
 
-        # Patch yfinance to return '-' for every ticker
-        import types
-
-        fake_yf = types.ModuleType("yfinance")
-
-        class _FakeTicker:
-            def __init__(self, t):
-                pass
-
-            @property
-            def isin(self):
-                return "-"
-
-        fake_yf.Ticker = _FakeTicker
-        monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+        monkeypatch.setattr("import_etf_holdings.yahoo_isin_from_ticker", lambda t: None)
 
         rows = [{"ticker": "NVDA", "name": "NVIDIA CORP", "weight": 0.0843, "isin": None}]
-        # Clear cache so the patched yfinance is actually called
         m._isin_cache.clear()
         result = m.resolve_isins(rows)
         assert result[0]["isin"] == "US67066G1040"
 
-    def test_resolve_isins_validates_yfinance_result(self, monkeypatch):
-        """A syntactically valid-looking but wrong ISIN from yfinance should pass through."""
-        import sys
-
-        scripts_dir = str(Path(__file__).parent.parent / "scripts")
-        if scripts_dir not in sys.path:
-            monkeypatch.syspath_prepend(scripts_dir)
+    def test_resolve_isins_uses_yahoo_result_when_valid(self, monkeypatch):
+        """A valid-format ISIN from yahoo_isin_from_ticker is accepted."""
         m = _import_module()
 
-        import types
-
-        fake_yf = types.ModuleType("yfinance")
-
-        class _FakeTicker:
-            def __init__(self, t):
-                self._t = t
-
-            @property
-            def isin(self):
-                return "JP3902900004"  # valid format, returned for any ticker
-
-        fake_yf.Ticker = _FakeTicker
-        monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+        monkeypatch.setattr(
+            "import_etf_holdings.yahoo_isin_from_ticker",
+            lambda t: "JP3902900004",
+        )
 
         rows = [{"ticker": "UNKNWN", "name": "UNKNOWN CO", "weight": 0.01, "isin": None}]
         m._isin_cache.clear()
         result = m.resolve_isins(rows)
-        # yfinance returned a valid-format ISIN — should be kept as-is
         assert result[0]["isin"] == "JP3902900004"

@@ -113,8 +113,8 @@ JustETFConstituentProvider → YahooTopHoldingsProvider`
 User manually downloaded ETF constituent files from fund providers.
 
 - [x] `scripts/import_etf_holdings.py` written — parses iShares CSV, DWS XLSX,
-  Vanguard XLSX; resolves ISINs via yfinance + `_NASDAQ100_ISIN_SUPPLEMENT`
-  (42-entry hardcoded table for tickers yfinance returns `"-"` for);
+  Vanguard XLSX; resolves ISINs via `yahoo_isin_from_ticker` + `_NASDAQ100_ISIN_SUPPLEMENT`
+  (42-entry hardcoded table for tickers Yahoo doesn't embed ISIN for);
   validates ISINs against regex; writes `{cache_dir}/{isin}.json` as fraction
   coverage_pct (0–1, matching `ConstituentResult.coverage_pct` convention)
 - [x] `tests/test_import_etf_holdings.py` — 25 tests (all passing):
@@ -122,12 +122,27 @@ User manually downloaded ETF constituent files from fund providers.
   supplement fallback; dash-ISIN treated as unresolved
 - [x] `_validate_isin()` added — filters `"-"` and non-ISIN strings to `None`
 - [x] `_NASDAQ100_ISIN_SUPPLEMENT` — 42 entries covering all major NASDAQ-100
-  US stocks that yfinance returns `"-"` for
+  US stocks Yahoo doesn't embed ISIN for
 - [x] Notebook 08 — warning cell added above Step 0 documenting the manual
   download requirement and refresh procedure
 - [x] `scripts/portfolio_composition.py` — prints `⚠ WARNING` to stderr when
   any ETF's constituent cache `source == "user_provided_file"`
 - [x] 241 tests pass, ruff clean
+
+### [x] Step 8 — Unified Yahoo Finance integration; remove Playwright (third session)
+
+- [x] `yahoo_isin_from_ticker(ticker)` added to `src/portfolio_sim.py` — uses
+  `_yahoo_crumb_session()` to call Yahoo Finance search page; single unified
+  Yahoo integration, no yfinance SDK
+- [x] `PlaywrightConstituentProvider` removed from `src/portfolio_sim.py`
+  (class + `_DEFAULT_ETF_PRODUCT_URLS` dict)
+- [x] `import_etf_holdings.py` updated: `yfinance` removed, imports
+  `yahoo_isin_from_ticker` from `portfolio_sim`; `_REGION_TO_SUFFIX` no longer
+  used for candidate generation (Yahoo search handles region internally)
+- [x] `playwright` and `yfinance` removed from `requirements-dev.txt`
+- [x] Dockerfile: Chromium OS deps and `playwright install chromium` removed
+- [x] Notebook 08: `PlaywrightConstituentProvider` removed from imports and chain
+- [x] 240 tests pass (3 new `TestYahooIsInFromTicker` tests added), ruff clean
 
 **Final coverage after user-provided files:**
 | ISIN          | Name              | Coverage | Source            |
@@ -146,12 +161,12 @@ Microsoft are the leading positions.
   if index constituents change significantly (annual rebalances are minor).
 - **MRVL** (Marvell Technology, reincorporated 2021) remains unresolved (~1%
   of NASDAQ-100, ~0.3% portfolio) — new US ISIN not yet in supplement.
-- **Vanguard Europe** has 0% ISIN coverage — the 500 EU tickers would require
-  ~500 yfinance calls (rate-limited). Use `--etf IE00B945VV12` flag to force
-  resolution if needed; it is a ~1% portfolio position.
+- **Vanguard Europe** has 0% ISIN coverage — 500 Yahoo Finance search calls would
+  be heavily rate-limited. Use `--etf IE00B945VV12` flag to force resolution if
+  needed; it is a ~1% portfolio position.
 - **vice01.ishares.com AJAX endpoint** returns JS challenge (bot protection);
   direct download automation remains blocked.
-- Some yfinance ISINs for non-US NASDAQ-listed stocks may be wrong
-  (e.g., GOOGL → Canadian ISIN; BKR → Argentine ISIN). These affect ~3-5%
-  of iShares holdings weight but do not affect the major direct-overlap
+- Some Yahoo Finance search results for non-US NASDAQ-listed stocks may embed the
+  wrong country ISIN (e.g., GOOGL → Canadian ISIN; BKR → Argentine ISIN). These
+  affect ~3-5% of iShares holdings weight but do not affect the major direct-overlap
   calculations.

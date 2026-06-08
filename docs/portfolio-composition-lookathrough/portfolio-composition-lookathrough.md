@@ -73,33 +73,32 @@ The `_UNRESOLVED_` residual dropped from ~20% to under 1% of portfolio weight.
   - `ETFConstituentProvider` ABC
   - `CsvConstituentProvider` (iShares/Amundi CSV downloads with sidecar cache)
   - `JustETFConstituentProvider` (bs4 scraping of justetf.com, top 10 holdings)
-  - `PlaywrightConstituentProvider` (headless Chromium, full CSV via browser
-    automation; runs in dedicated thread to avoid Jupyter asyncio conflict)
   - `YahooTopHoldingsProvider` (Yahoo Finance topHoldings fallback)
+  - `yahoo_isin_from_ticker()` — ISIN lookup via Yahoo Finance search page,
+    using the existing `_yahoo_crumb_session()` infrastructure (single unified
+    Yahoo integration; no yfinance SDK)
   - `ChainedConstituentProvider` (try providers in order)
   - `SecurityMetadata` dataclass, `_YahooTickerCache`, `YahooFinanceMetadataProvider`
   - `CompositionResult` dataclass, `aggregate_portfolio_composition()`
   - `breakdown_by_sector/industry/country/region/currency/asset_class/market_cap_tier/beta_bucket/etf_structure/etf_domicile()`
-- `tests/test_portfolio_sim.py` — 216 tests pass, 10 skipped
+- `tests/test_portfolio_sim.py` — 240 tests pass, 10 skipped
 - `scripts/portfolio_composition.py` — new CLI script
 - `notebooks/08_portfolio_composition.ipynb` — new notebook
 
 ## Known limitations
 
 - **iShares ISIN supplement** (`_NASDAQ100_ISIN_SUPPLEMENT` in `import_etf_holdings.py`)
-  is a 42-entry static table for US-listed tickers that yfinance returns `"-"` for.
-  Update after significant NASDAQ-100 rebalances. MRVL (Marvell, reincorporated 2021)
-  remains unresolved (~0.3% portfolio weight).
-- **Vanguard Europe** has 0% ISIN coverage — 500 EU tickers would saturate yfinance rate
-  limits. It is ~1% of the portfolio; use `--etf IE00B945VV12` to force resolution.
+  is a 42-entry static table for US-listed tickers that Yahoo Finance's search page does
+  not embed an ISIN for. Update after significant NASDAQ-100 rebalances.
+  MRVL (Marvell, reincorporated 2021) remains unresolved (~0.3% portfolio weight).
+- **Vanguard Europe** has 0% ISIN coverage — 500 EU tickers would saturate Yahoo Finance
+  rate limits. It is ~1% of the portfolio; use `--etf IE00B945VV12` to force resolution.
 - **yfinance ISIN data quality**: some NASDAQ-listed foreign companies receive wrong country
   ISINs (GOOGL → Canadian ISIN, BKR → Argentine ISIN). Affects ~3–5% of iShares weight.
 - `CsvConstituentProvider` uses sentinel URLs (`manually_provided://user_downloaded`) in
   `etf_download_urls.json`; if the cache is cleared, the chain falls through to JustETF.
 - `JustETFConstituentProvider` returns only the top 10 holdings (20–47% coverage). It is
   the fallback when cache is absent or import has not been run.
-- `PlaywrightConstituentProvider` times out on iShares product pages from Docker (JS-heavy;
-  `load` event never fires reliably). It falls through to JustETF via the chain.
 - Yahoo Finance `topHoldings` returns empty `holdings` for European-listed ETFs — it is
   rarely useful for this portfolio.
 - Beta is S&P 500 relative only. Multi-benchmark beta is deferred.

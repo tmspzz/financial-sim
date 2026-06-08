@@ -680,6 +680,29 @@ def _yahoo_crumb_session() -> tuple[requests.Session, str]:
     return session, crumb
 
 
+def yahoo_isin_from_ticker(ticker: str) -> str | None:
+    """Return the ISIN for a ticker using Yahoo Finance's search page.
+
+    Uses the same session/crumb infrastructure as the rest of this module,
+    giving a single Yahoo Finance integration point.  Returns None when Yahoo
+    does not embed an ISIN in the search-page JSON (common for US-listed
+    domestic stocks — use _NASDAQ100_ISIN_SUPPLEMENT in import_etf_holdings.py
+    as the authoritative fallback for those).
+    """
+    _ISIN_RE = re.compile(r'"isin"\s*:\s*"([A-Z]{2}[A-Z0-9]{9}[0-9])"')
+    try:
+        session, _crumb = _yahoo_crumb_session()
+        resp = session.get(
+            "https://finance.yahoo.com/search/",
+            params={"q": ticker, "lang": "en-US", "region": "US"},
+            timeout=10,
+        )
+        m = _ISIN_RE.search(resp.text)
+        return m.group(1) if m else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class YahooTopHoldingsProvider(ETFConstituentProvider):
     """Yahoo Finance topHoldings fallback.
 
@@ -737,15 +760,6 @@ class YahooTopHoldingsProvider(ETFConstituentProvider):
             source="yahoo_top_holdings",
         )
 
-
-# Default product-page URLs for known ETFs (ISIN → provider page URL).
-# Used by PlaywrightConstituentProvider when no explicit map is supplied.
-_DEFAULT_ETF_PRODUCT_URLS: dict[str, str] = {
-    "DE000A0F5UF5": "https://www.ishares.com/de/privatanleger/de/produkte/251896/ishares-nasdaq100-ucits-etf-de-fund",
-    "IE00B945VV12": "https://www.vanguardinvestor.co.uk/investments/vanguard-ftse-developed-europe-ucits-etf-eur-distributing",
-    "LU0274209740": "https://etf.dws.com/en/LU0274209740-msci-japan-ucits-etf-1c/",
-    "IE00BTJRMP35": "https://etf.dws.com/en/IE00BTJRMP35-msci-em-markets-1c/",
-}
 
 # justETF profile page base URL
 _JUSTETF_PROFILE_URL = "https://www.justetf.com/en/etf-profile.html"
@@ -839,177 +853,6 @@ class JustETFConstituentProvider(ETFConstituentProvider):
     def _cache_path(self, isin: str) -> Path:
         assert self._cache_dir is not None
         return self._cache_dir / f"{isin}_justetf.json"
-
-    def _load_cache(self, isin: str) -> ConstituentResult | None:
-        path = self._cache_path(isin)
-        if not path.exists():
-            return None
-        data = json.loads(path.read_text())
-        return ConstituentResult(
-            etf_isin=data["etf_isin"],
-            constituents=[ConstituentRow(**c) for c in data["constituents"]],
-            coverage_pct=data["coverage_pct"],
-            as_of=data["as_of"],
-            source=data["source"],
-        )
-
-    def _save_cache(self, isin: str, result: ConstituentResult) -> None:
-        assert self._cache_dir is not None
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-        data = {
-            "etf_isin": result.etf_isin,
-            "constituents": [
-                {"isin": c.isin, "ticker": c.ticker, "name": c.name, "weight": c.weight}
-                for c in result.constituents
-            ],
-            "coverage_pct": result.coverage_pct,
-            "as_of": result.as_of,
-            "source": result.source,
-        }
-        self._cache_path(isin).write_text(json.dumps(data, indent=2))
-
-
-class PlaywrightConstituentProvider(ETFConstituentProvider):
-    """Downloads full ETF holdings CSVs by driving a headless Chromium browser.
-
-    Navigates to the provider's product page, intercepts the CSV download
-    network request, and parses the response with CsvConstituentProvider.
-
-    provider_url_map: ISIN → product page URL.  Defaults to
-        _DEFAULT_ETF_PRODUCT_URLS for the four known portfolio ETFs.
-    cache_dir: if given, parsed results are cached as JSON (same schema as
-        CsvConstituentProvider) so repeated runs skip the browser round-trip.
-    """
-
-    # CSS selectors / URL patterns that trigger a CSV download on each provider page
-    _DOWNLOAD_TRIGGERS: list[str] = [
-        "a[href*='fileType=csv']",
-        "button[data-file-type='csv']",
-        "[data-export-url]",
-        "a[download]",
-        "a[href*='.csv']",
-        "a[href*='holdings']",
-    ]
-    _CSV_URL_PATTERNS: list[str] = [
-        r"\.ajax\?.*fileType=csv",
-        r"download.*\.csv",
-        r"holdings.*\.csv",
-        r"\.csv(\?|$)",
-    ]
-
-    def __init__(
-        self,
-        provider_url_map: dict[str, str] | None = None,
-        cache_dir: Path | None = None,
-    ) -> None:
-        self._url_map = dict(provider_url_map or _DEFAULT_ETF_PRODUCT_URLS)
-        self._cache_dir = cache_dir
-
-    def get_constituents(self, isin: str) -> ConstituentResult:
-        try:
-            import playwright  # noqa: F401  # type: ignore[import]
-        except ImportError as exc:
-            raise KeyError(f"playwright required for browser-based ETF fetching of {isin}") from exc
-
-        if isin not in self._url_map:
-            raise KeyError(f"No product page URL configured for ISIN {isin!r}")
-
-        if self._cache_dir is not None:
-            cached = self._load_cache(isin)
-            if cached is not None:
-                return cached
-
-        product_url = self._url_map[isin]
-        csv_text = self._fetch_csv_via_browser(isin, product_url)
-        result = CsvConstituentProvider._parse_csv(isin, csv_text)
-
-        if self._cache_dir is not None:
-            self._save_cache(isin, result)
-        return result
-
-    def _fetch_csv_via_browser(self, isin: str, product_url: str) -> str:
-        """Run Playwright in a dedicated thread to avoid asyncio event-loop conflicts.
-
-        Jupyter notebooks run inside an asyncio loop; sync_playwright cannot be used
-        directly there. Spawning a background thread with its own event loop sidesteps
-        the conflict and works in both notebook and script contexts.
-        """
-        import asyncio
-        import threading
-
-        result_box: list[str] = []
-        error_box: list[Exception] = []
-
-        async def _async_fetch() -> str:
-            from playwright.async_api import async_playwright  # type: ignore[import]
-
-            captured: list[str] = []
-
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent=_BROWSER_UA,
-                    accept_downloads=True,
-                )
-                page = await context.new_page()
-
-                # Intercept responses that look like CSV holdings files
-                async def handle_response(response) -> None:
-                    url = response.url
-                    if any(re.search(pat, url) for pat in self._CSV_URL_PATTERNS):
-                        with contextlib.suppress(Exception):
-                            body = await response.body()
-                            captured.append(body.decode("utf-8", errors="replace"))
-
-                page.on("response", handle_response)
-                await page.goto(product_url, wait_until="load", timeout=30_000)
-
-                # Try clicking any element that looks like a CSV download trigger
-                for selector in self._DOWNLOAD_TRIGGERS:
-                    with contextlib.suppress(Exception):
-                        el = await page.query_selector(selector)
-                        if el:
-                            async with page.expect_download(timeout=15_000) as dl_info:
-                                await el.click()
-                            download = await dl_info.value
-                            path = download.path()
-                            if path:
-                                captured.append(Path(path).read_text(errors="replace"))
-                            break
-
-                await browser.close()
-
-            if not captured:
-                raise ValueError(
-                    f"Playwright could not capture a CSV download from {product_url} for {isin}"
-                )
-            return captured[0]
-
-        def _thread_main() -> None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result_box.append(loop.run_until_complete(_async_fetch()))
-            except Exception as exc:
-                error_box.append(exc)
-            finally:
-                loop.close()
-
-        t = threading.Thread(target=_thread_main, daemon=True)
-        t.start()
-        t.join(timeout=45)
-
-        if t.is_alive():
-            raise ValueError(f"Playwright fetch timed out for {isin} ({product_url})")
-        if error_box:
-            raise ValueError(
-                f"Playwright failed for {isin} ({product_url}): {error_box[0]}"
-            ) from error_box[0]
-        return result_box[0]
-
-    def _cache_path(self, isin: str) -> Path:
-        assert self._cache_dir is not None
-        return self._cache_dir / f"{isin}_playwright.json"
 
     def _load_cache(self, isin: str) -> ConstituentResult | None:
         path = self._cache_path(isin)

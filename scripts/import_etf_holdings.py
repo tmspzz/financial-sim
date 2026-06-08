@@ -17,7 +17,9 @@ WARNING: Holdings data comes from manually downloaded provider files — not liv
 API data.  Re-run this script after downloading fresh files to update the cache.
 Staleness is based on the as-of date embedded in each source file.
 
-ISIN resolution for ticker-only files (iShares, Vanguard) uses yfinance.
+ISIN resolution for ticker-only files (iShares, Vanguard) uses Yahoo Finance's
+search page via portfolio_sim.yahoo_isin_from_ticker (same session/crumb
+infrastructure as the rest of the project — no separate SDK required).
 Rows whose ISIN cannot be resolved are stored with isin=null and will appear
 in the _UNRESOLVED_ bucket during portfolio look-through analysis.
 """
@@ -26,11 +28,12 @@ from __future__ import annotations
 
 import json
 import re
-import warnings
 from datetime import date as _date
 from pathlib import Path
 
 import pandas as pd
+
+from portfolio_sim import yahoo_isin_from_ticker
 
 # ── Source file configuration ─────────────────────────────────────────────────
 
@@ -312,62 +315,45 @@ def parse_vanguard_xlsx(path: Path) -> tuple[list[dict], str]:
     return rows, as_of
 
 
-# ── ISIN resolution via yfinance ──────────────────────────────────────────────
+# ── ISIN resolution via Yahoo Finance ────────────────────────────────────────
 
 _isin_cache: dict[str, str | None] = {}
 
 
 def resolve_isins(rows: list[dict], *, verbose: bool = False) -> list[dict]:
-    """Try to resolve isin=None rows using yfinance.
+    """Try to resolve isin=None rows using Yahoo Finance's search page.
+
+    Uses portfolio_sim.yahoo_isin_from_ticker, which shares the same
+    session/crumb infrastructure as the rest of the project (no yfinance SDK).
+    Falls back to _NASDAQ100_ISIN_SUPPLEMENT for US-listed tickers that Yahoo
+    does not embed an ISIN for.
 
     Modifies rows in place (adds 'isin' where found). Returns the same list.
     Rows that can't be resolved keep isin=None.
     """
-    try:
-        import yfinance as yf  # type: ignore[import]
-    except ImportError:
-        warnings.warn("yfinance not installed; ISIN resolution skipped", stacklevel=2)
-        return rows
-
     unresolved = [r for r in rows if not r.get("isin")]
     if not unresolved:
         return rows
 
     if verbose:
-        print(f"  Resolving ISINs for {len(unresolved)} tickers via yfinance...")
+        print(f"  Resolving ISINs for {len(unresolved)} tickers via Yahoo Finance...")
 
     import time
 
     for r in unresolved:
         ticker = r.get("ticker")
-        region = r.get("region")
         if not ticker:
             continue
 
-        # For European regions, try exchange suffix first to avoid 404s
-        candidates: list[str] = []
-        if region and region in _REGION_TO_SUFFIX:
-            candidates.append(ticker + _REGION_TO_SUFFIX[region])
-        candidates.append(ticker)  # base ticker as fallback
+        if ticker in _isin_cache:
+            isin = _isin_cache[ticker]
+        else:
+            isin = yahoo_isin_from_ticker(ticker)
+            isin = _validate_isin(isin)  # reject '-' and non-ISIN strings
+            time.sleep(0.1)  # avoid rate limiting
+            _isin_cache[ticker] = isin
 
-        isin: str | None = None
-        for t in candidates:
-            if t in _isin_cache:
-                isin = _isin_cache[t]
-                if isin:
-                    break
-                continue
-            try:
-                raw = yf.Ticker(t).isin or None
-                isin = _validate_isin(raw)
-                time.sleep(0.1)  # avoid rate limiting
-            except Exception:
-                isin = None
-            _isin_cache[t] = isin
-            if isin:
-                break
-
-        # Fall back to supplement table when yfinance returns '-' or nothing
+        # Fall back to supplement table when Yahoo doesn't embed an ISIN
         if not isin and ticker in _NASDAQ100_ISIN_SUPPLEMENT:
             isin = _NASDAQ100_ISIN_SUPPLEMENT[ticker]
 
@@ -560,7 +546,9 @@ if __name__ == "__main__":
     parser.add_argument("--source-dir", default="data/private/etf_composition_data_user_provided")
     parser.add_argument("--cache-dir", default="data/private/etf_constituents_cache")
     parser.add_argument("--urls-path", default="data/private/etf_download_urls.json")
-    parser.add_argument("--no-resolve", action="store_true", help="Skip yfinance ISIN resolution")
+    parser.add_argument(
+        "--no-resolve", action="store_true", help="Skip Yahoo Finance ISIN resolution"
+    )
     parser.add_argument(
         "--etf",
         metavar="ISIN",

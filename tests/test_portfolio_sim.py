@@ -18,7 +18,6 @@ from portfolio_sim import (
     CsvConstituentProvider,
     ECBProvider,
     JustETFConstituentProvider,
-    PlaywrightConstituentProvider,
     PriceProvider,
     StaticPriceProvider,
     UnsupportedCorporateAction,
@@ -1462,64 +1461,41 @@ class TestJustETFConstituentProvider:
         assert result.source == "justetf_top_holdings"
 
 
-# ── Slice 1c: PlaywrightConstituentProvider ────────────────────────────────────
+# ── Slice 1c: yahoo_isin_from_ticker ──────────────────────────────────────────
 
 
-class TestPlaywrightConstituentProvider:
-    def test_raises_key_error_for_unknown_isin(self, tmp_path):
+class TestYahooIsInFromTicker:
+    def test_returns_isin_from_search_page(self):
+        from portfolio_sim import yahoo_isin_from_ticker
 
-        provider = PlaywrightConstituentProvider(provider_url_map={}, cache_dir=tmp_path)
-        with pytest.raises(KeyError):
-            provider.get_constituents("IE00UNKNOWN0")
+        fake_html = '<html><script>{"isin":"NL0009538784"}</script></html>'
+        with patch("portfolio_sim._yahoo_crumb_session") as mock_sess:
+            resp = MagicMock()
+            resp.text = fake_html
+            mock_sess.return_value = (MagicMock(get=MagicMock(return_value=resp)), "crumb")
+            result = yahoo_isin_from_ticker("NXPI")
+        assert result == "NL0009538784"
 
-    def test_raises_key_error_when_playwright_missing(self, tmp_path):
-        import builtins
+    def test_returns_none_when_isin_absent(self):
+        from portfolio_sim import yahoo_isin_from_ticker
 
-        real_import = builtins.__import__
+        with patch("portfolio_sim._yahoo_crumb_session") as mock_sess:
+            resp = MagicMock()
+            resp.text = "<html>no isin here</html>"
+            mock_sess.return_value = (MagicMock(get=MagicMock(return_value=resp)), "crumb")
+            result = yahoo_isin_from_ticker("NVDA")
+        assert result is None
 
-        def block_playwright(name, *args, **kwargs):
-            if name == "playwright":
-                raise ImportError("mocked missing playwright")
-            return real_import(name, *args, **kwargs)
+    def test_returns_none_on_request_exception(self):
+        from portfolio_sim import yahoo_isin_from_ticker
 
-        provider = PlaywrightConstituentProvider(
-            provider_url_map={"DE000A0F5UF5": "https://example.com"},
-            cache_dir=tmp_path,
-        )
-        with patch("builtins.__import__", side_effect=block_playwright), pytest.raises(KeyError):
-            provider.get_constituents("DE000A0F5UF5")
-
-    def test_uses_cache_on_second_call(self, tmp_path):
-        from portfolio_sim import ConstituentResult, ConstituentRow
-
-        cached_result = ConstituentResult(
-            etf_isin="DE000A0F5UF5",
-            constituents=[
-                ConstituentRow(isin="US67066G1040", ticker=None, name="NVIDIA", weight=0.087)
-            ],
-            coverage_pct=0.087,
-            as_of="2026-03-31",
-            source="playwright_csv",
-        )
-        provider = PlaywrightConstituentProvider(
-            provider_url_map={"DE000A0F5UF5": "https://example.com"},
-            cache_dir=tmp_path,
-        )
-        # Pre-populate cache
-        provider._save_cache("DE000A0F5UF5", cached_result)
-
-        # Should serve from cache without touching playwright
-        result = provider.get_constituents("DE000A0F5UF5")
-        assert result.source == "playwright_csv"
-        assert result.constituents[0].isin == "US67066G1040"
-
-    def test_default_url_map_covers_portfolio_etfs(self):
-        from portfolio_sim import _DEFAULT_ETF_PRODUCT_URLS
-
-        provider = PlaywrightConstituentProvider()
-        for isin in ["DE000A0F5UF5", "IE00B945VV12", "LU0274209740", "IE00BTJRMP35"]:
-            assert isin in provider._url_map
-            assert isin in _DEFAULT_ETF_PRODUCT_URLS
+        with patch("portfolio_sim._yahoo_crumb_session") as mock_sess:
+            mock_sess.return_value = (
+                MagicMock(get=MagicMock(side_effect=OSError("network down"))),
+                "crumb",
+            )
+            result = yahoo_isin_from_ticker("AAPL")
+        assert result is None
 
 
 # ── Slice 2: Security metadata provider ───────────────────────────────────────
