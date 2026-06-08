@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker run --rm -v *)",
+      "Bash(docker compose *)",
+      "Bash(docker exec *)",
+      "Bash(ruff *)",
+      "Bash(pytest*)"
+    ]
+  }
+}

@@ -45,3 +45,9 @@ data/private/
 .idea/
 *.swp
 *.swo
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
+# Auto-generated session memory; content is captured in .agents/ and CLAUDE.md.
+.claude/projects/
+# User-local permission overrides (not shared).
+.claude/settings.local.json
