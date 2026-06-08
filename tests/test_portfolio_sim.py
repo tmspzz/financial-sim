@@ -17,6 +17,8 @@ from portfolio_sim import (
     ConstituentRow,
     CsvConstituentProvider,
     ECBProvider,
+    JustETFConstituentProvider,
+    PlaywrightConstituentProvider,
     PriceProvider,
     StaticPriceProvider,
     UnsupportedCorporateAction,
@@ -1153,16 +1155,20 @@ class TestCsvConstituentProvider:
 
 
 class TestYahooTopHoldingsProvider:
-    def _make_response(self, payload: dict) -> MagicMock:
+    def _make_crumb_mock(self, payload: dict) -> tuple[MagicMock, str]:
+        """Return (mock_session, crumb) suitable for patching _yahoo_crumb_session."""
         resp = MagicMock()
         resp.json = MagicMock(return_value=payload)
         resp.raise_for_status = MagicMock()
-        return resp
+        session = MagicMock()
+        session.get = MagicMock(return_value=resp)
+        return session, "test-crumb"
 
     def test_returns_top_holdings(self):
         provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_TOP_HOLDINGS),
         ):
             result = provider.get_constituents("IE00TEST0001")
 
@@ -1173,7 +1179,8 @@ class TestYahooTopHoldingsProvider:
     def test_weights_from_holdingPercent(self):
         provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_TOP_HOLDINGS),
         ):
             result = provider.get_constituents("IE00TEST0001")
 
@@ -1183,7 +1190,8 @@ class TestYahooTopHoldingsProvider:
     def test_coverage_pct_from_holdingsPercent(self):
         provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_TOP_HOLDINGS),
         ):
             result = provider.get_constituents("IE00TEST0001")
 
@@ -1192,7 +1200,8 @@ class TestYahooTopHoldingsProvider:
     def test_isin_none_when_no_reverse_map(self):
         provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_TOP_HOLDINGS),
         ):
             result = provider.get_constituents("IE00TEST0001")
 
@@ -1205,7 +1214,8 @@ class TestYahooTopHoldingsProvider:
             reverse_ticker_map=reverse,
         )
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_TOP_HOLDINGS)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_TOP_HOLDINGS),
         ):
             result = provider.get_constituents("IE00TEST0001")
 
@@ -1216,6 +1226,32 @@ class TestYahooTopHoldingsProvider:
         provider = YahooTopHoldingsProvider(isin_to_ticker={})
         with pytest.raises(KeyError):
             provider.get_constituents("IE00UNKNOWN0")
+
+    def test_http_error_raises_value_error(self):
+        import requests as _req
+
+        provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        bad_resp = MagicMock()
+        bad_resp.raise_for_status.side_effect = _req.exceptions.HTTPError("401 Unauthorized")
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=bad_resp)
+        with (
+            patch("portfolio_sim._yahoo_crumb_session", return_value=(mock_session, "crumb")),
+            pytest.raises(ValueError, match="401"),
+        ):
+            provider.get_constituents("IE00TEST0001")
+
+    def test_connection_error_raises_value_error(self):
+        import requests as _req
+
+        provider = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        mock_session = MagicMock()
+        mock_session.get.side_effect = _req.exceptions.ConnectionError("network failure")
+        with (
+            patch("portfolio_sim._yahoo_crumb_session", return_value=(mock_session, "crumb")),
+            pytest.raises(ValueError, match="network failure"),
+        ):
+            provider.get_constituents("IE00TEST0001")
 
 
 class TestChainedConstituentProvider:
@@ -1240,16 +1276,23 @@ class TestChainedConstituentProvider:
 
         assert result.source == "csv"
 
+    def _yahoo_session_mock(self, payload: dict) -> tuple[MagicMock, str]:
+        resp = MagicMock()
+        resp.json = MagicMock(return_value=payload)
+        resp.raise_for_status = MagicMock()
+        session = MagicMock()
+        session.get = MagicMock(return_value=resp)
+        return session, "test-crumb"
+
     def test_falls_through_to_second_on_key_error(self):
         no_url = CsvConstituentProvider(url_map={})
         fallback = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
         chained = ChainedConstituentProvider([no_url, fallback])
 
-        with patch("portfolio_sim.requests.get") as mock_get:
-            resp = MagicMock()
-            resp.raise_for_status = MagicMock()
-            resp.json = MagicMock(return_value=_YAHOO_TOP_HOLDINGS)
-            mock_get.return_value = resp
+        with patch(
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._yahoo_session_mock(_YAHOO_TOP_HOLDINGS),
+        ):
             result = chained.get_constituents("IE00TEST0001")
 
         assert result.source == "yahoo_top_holdings"
@@ -1263,6 +1306,220 @@ class TestChainedConstituentProvider:
         )
         with pytest.raises(KeyError):
             chained.get_constituents("IE00UNKNOWN0")
+
+    def test_falls_through_on_http_error(self):
+        import requests as _req
+
+        # First provider raises HTTPError; second returns a valid result.
+        first = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        second = YahooTopHoldingsProvider(isin_to_ticker={"IE00TEST0001": "IWDA.AS"})
+        chained = ChainedConstituentProvider([first, second])
+
+        call_count = {"n": 0}
+
+        def crumb_side_effect():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                bad_resp = MagicMock()
+                bad_resp.raise_for_status.side_effect = _req.exceptions.HTTPError("401")
+                bad_session = MagicMock()
+                bad_session.get = MagicMock(return_value=bad_resp)
+                return bad_session, "crumb"
+            good_resp = MagicMock()
+            good_resp.raise_for_status = MagicMock()
+            good_resp.json = MagicMock(return_value=_YAHOO_TOP_HOLDINGS)
+            good_session = MagicMock()
+            good_session.get = MagicMock(return_value=good_resp)
+            return good_session, "crumb"
+
+        with patch("portfolio_sim._yahoo_crumb_session", side_effect=crumb_side_effect):
+            result = chained.get_constituents("IE00TEST0001")
+
+        assert result.source == "yahoo_top_holdings"
+
+
+# ── Slice 1b: JustETFConstituentProvider ──────────────────────────────────────
+
+_JUSTETF_HTML = """
+<html><body>
+<tr data-testid="etf-holdings_top-holdings_row">
+  <td><a data-testid="tl_etf-holdings_top-holdings_link_name"
+         href="/en/stock-profiles/US67066G1040">NVIDIA Corp.</a></td>
+  <td><span data-testid="tl_etf-holdings_top-holdings_value_percentage">8.68%</span></td>
+</tr>
+<tr data-testid="etf-holdings_top-holdings_row">
+  <td><a data-testid="tl_etf-holdings_top-holdings_link_name"
+         href="/en/stock-profiles/US0378331005">Apple</a></td>
+  <td><span data-testid="tl_etf-holdings_top-holdings_value_percentage">7.63%</span></td>
+</tr>
+<div data-testid="tl_etf-holdings_reference-date">31/03/2026</div>
+</body></html>
+"""
+
+
+class TestJustETFConstituentProvider:
+    from portfolio_sim import JustETFConstituentProvider
+
+    def _make_response(self, text: str, status: int = 200) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.text = text
+        return resp
+
+    def test_parses_holdings_and_isins(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_JUSTETF_HTML)):
+            result = provider.get_constituents("DE000A0F5UF5")
+
+        assert result.etf_isin == "DE000A0F5UF5"
+        assert result.source == "justetf_top_holdings"
+        isins = [c.isin for c in result.constituents]
+        assert "US67066G1040" in isins
+        assert "US0378331005" in isins
+
+    def test_weights_parsed_correctly(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_JUSTETF_HTML)):
+            result = provider.get_constituents("DE000A0F5UF5")
+
+        nvidia = next(c for c in result.constituents if c.isin == "US67066G1040")
+        assert nvidia.weight == pytest.approx(0.0868, abs=1e-4)
+
+    def test_coverage_pct_is_sum_of_weights(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_JUSTETF_HTML)):
+            result = provider.get_constituents("DE000A0F5UF5")
+
+        assert result.coverage_pct == pytest.approx(0.0868 + 0.0763, abs=1e-4)
+
+    def test_holdings_date_parsed_dd_mm_yyyy(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_JUSTETF_HTML)):
+            result = provider.get_constituents("DE000A0F5UF5")
+
+        assert result.as_of == "2026-03-31"
+
+    def test_raises_on_http_error(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with (
+            patch("portfolio_sim.requests.get", return_value=self._make_response("", status=503)),
+            pytest.raises(ValueError, match="503"),
+        ):
+            provider.get_constituents("DE000A0F5UF5")
+
+    def test_raises_when_no_holdings_in_html(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with (
+            patch("portfolio_sim.requests.get", return_value=self._make_response("<html></html>")),
+            pytest.raises(ValueError, match="No holdings"),
+        ):
+            provider.get_constituents("DE000A0F5UF5")
+
+    def test_raises_key_error_when_bs4_missing(self, tmp_path):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_bs4(name, *args, **kwargs):
+            if name == "bs4":
+                raise ImportError("mocked missing bs4")
+            return real_import(name, *args, **kwargs)
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with patch("builtins.__import__", side_effect=block_bs4), pytest.raises(KeyError):
+            provider.get_constituents("DE000A0F5UF5")
+
+    def test_caches_result_to_disk(self, tmp_path):
+
+        provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        with patch(
+            "portfolio_sim.requests.get", return_value=self._make_response(_JUSTETF_HTML)
+        ) as mock_get:
+            provider.get_constituents("DE000A0F5UF5")
+            provider.get_constituents("DE000A0F5UF5")
+
+        mock_get.assert_called_once()  # second call served from cache
+
+    def test_chained_falls_through_to_justetf(self, tmp_path):
+        from portfolio_sim import (
+            ChainedConstituentProvider,
+            CsvConstituentProvider,
+        )
+
+        csv_provider = CsvConstituentProvider(url_map={})
+        justetf_provider = JustETFConstituentProvider(cache_dir=tmp_path)
+        chained = ChainedConstituentProvider([csv_provider, justetf_provider])
+
+        with patch("portfolio_sim.requests.get", return_value=self._make_response(_JUSTETF_HTML)):
+            result = chained.get_constituents("DE000A0F5UF5")
+
+        assert result.source == "justetf_top_holdings"
+
+
+# ── Slice 1c: PlaywrightConstituentProvider ────────────────────────────────────
+
+
+class TestPlaywrightConstituentProvider:
+    def test_raises_key_error_for_unknown_isin(self, tmp_path):
+
+        provider = PlaywrightConstituentProvider(provider_url_map={}, cache_dir=tmp_path)
+        with pytest.raises(KeyError):
+            provider.get_constituents("IE00UNKNOWN0")
+
+    def test_raises_key_error_when_playwright_missing(self, tmp_path):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def block_playwright(name, *args, **kwargs):
+            if name == "playwright":
+                raise ImportError("mocked missing playwright")
+            return real_import(name, *args, **kwargs)
+
+        provider = PlaywrightConstituentProvider(
+            provider_url_map={"DE000A0F5UF5": "https://example.com"},
+            cache_dir=tmp_path,
+        )
+        with patch("builtins.__import__", side_effect=block_playwright), pytest.raises(KeyError):
+            provider.get_constituents("DE000A0F5UF5")
+
+    def test_uses_cache_on_second_call(self, tmp_path):
+        from portfolio_sim import ConstituentResult, ConstituentRow
+
+        cached_result = ConstituentResult(
+            etf_isin="DE000A0F5UF5",
+            constituents=[
+                ConstituentRow(isin="US67066G1040", ticker=None, name="NVIDIA", weight=0.087)
+            ],
+            coverage_pct=0.087,
+            as_of="2026-03-31",
+            source="playwright_csv",
+        )
+        provider = PlaywrightConstituentProvider(
+            provider_url_map={"DE000A0F5UF5": "https://example.com"},
+            cache_dir=tmp_path,
+        )
+        # Pre-populate cache
+        provider._save_cache("DE000A0F5UF5", cached_result)
+
+        # Should serve from cache without touching playwright
+        result = provider.get_constituents("DE000A0F5UF5")
+        assert result.source == "playwright_csv"
+        assert result.constituents[0].isin == "US67066G1040"
+
+    def test_default_url_map_covers_portfolio_etfs(self):
+        from portfolio_sim import _DEFAULT_ETF_PRODUCT_URLS
+
+        provider = PlaywrightConstituentProvider()
+        for isin in ["DE000A0F5UF5", "IE00B945VV12", "LU0274209740", "IE00BTJRMP35"]:
+            assert isin in provider._url_map
+            assert isin in _DEFAULT_ETF_PRODUCT_URLS
 
 
 # ── Slice 2: Security metadata provider ───────────────────────────────────────
@@ -1319,11 +1576,14 @@ _YAHOO_ETF_SUMMARY = {
 
 
 class TestYahooFinanceMetadataProvider:
-    def _make_response(self, payload: dict) -> MagicMock:
+    def _make_crumb_mock(self, payload: dict) -> tuple[MagicMock, str]:
+        """Return (mock_session, crumb) suitable for patching _yahoo_crumb_session."""
         resp = MagicMock()
         resp.json = MagicMock(return_value=payload)
         resp.raise_for_status = MagicMock()
-        return resp
+        session = MagicMock()
+        session.get = MagicMock(return_value=resp)
+        return session, "test-crumb"
 
     def test_imports(self):
         from portfolio_sim import SecurityMetadata, YahooFinanceMetadataProvider  # noqa: F401
@@ -1336,7 +1596,8 @@ class TestYahooFinanceMetadataProvider:
             cache_path=tmp_path / "meta.json",
         )
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_STOCK_SUMMARY),
         ):
             meta = provider.get_metadata("NL0010273215")
 
@@ -1352,7 +1613,8 @@ class TestYahooFinanceMetadataProvider:
             cache_path=tmp_path / "meta.json",
         )
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_STOCK_SUMMARY),
         ):
             meta = provider.get_metadata("NL0010273215")
 
@@ -1366,7 +1628,8 @@ class TestYahooFinanceMetadataProvider:
             cache_path=tmp_path / "meta.json",
         )
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_STOCK_SUMMARY),
         ):
             meta = provider.get_metadata("NL0010273215")
 
@@ -1380,7 +1643,8 @@ class TestYahooFinanceMetadataProvider:
             cache_path=tmp_path / "meta.json",
         )
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_ETF_SUMMARY)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_ETF_SUMMARY),
         ):
             meta = provider.get_metadata("IE00B4L5Y983")
 
@@ -1395,7 +1659,8 @@ class TestYahooFinanceMetadataProvider:
             etf_structure_overrides={"IE00B4L5Y983": "accumulating"},
         )
         with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_ETF_SUMMARY)
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(_YAHOO_ETF_SUMMARY),
         ):
             meta = provider.get_metadata("IE00B4L5Y983")
 
@@ -1428,7 +1693,10 @@ class TestYahooFinanceMetadataProvider:
             cache_path=tmp_path / "meta.json",
             ticker_cache=_YahooTickerCache(),  # isolated from module-level cache
         )
-        with patch("portfolio_sim.requests.get", return_value=self._make_response(summary)):
+        with patch(
+            "portfolio_sim._yahoo_crumb_session",
+            return_value=self._make_crumb_mock(summary),
+        ):
             meta = provider.get_metadata("IE00B4L5Y983")
 
         assert meta.etf_structure == "accumulating"
@@ -1442,13 +1710,12 @@ class TestYahooFinanceMetadataProvider:
             cache_path=cache,
             ticker_cache=_YahooTickerCache(),  # isolated so HTTP call always fires on first fetch
         )
-        with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
-        ) as mock_get:
+        mock_session, crumb = self._make_crumb_mock(_YAHOO_STOCK_SUMMARY)
+        with patch("portfolio_sim._yahoo_crumb_session", return_value=(mock_session, crumb)):
             provider.get_metadata("NL0010273215")
             provider.get_metadata("NL0010273215")  # second call reads from disk cache
 
-        mock_get.assert_called_once()
+        mock_session.get.assert_called_once()
 
     def test_ticker_fetched_once_per_session(self, tmp_path):
         """_YahooTickerCache: same ticker shared across two provider instances."""
@@ -1465,14 +1732,13 @@ class TestYahooFinanceMetadataProvider:
             cache_path=tmp_path / "meta2.json",
             ticker_cache=cache,
         )
-        with patch(
-            "portfolio_sim.requests.get", return_value=self._make_response(_YAHOO_STOCK_SUMMARY)
-        ) as mock_get:
+        mock_session, crumb = self._make_crumb_mock(_YAHOO_STOCK_SUMMARY)
+        with patch("portfolio_sim._yahoo_crumb_session", return_value=(mock_session, crumb)):
             p1.get_metadata("NL0010273215")
             p2.get_metadata("NL0010273215")
 
         # Both providers share the cache → only one HTTP call total
-        mock_get.assert_called_once()
+        mock_session.get.assert_called_once()
 
     def test_unknown_isin_raises_key_error(self, tmp_path):
         from portfolio_sim import YahooFinanceMetadataProvider
@@ -1483,6 +1749,44 @@ class TestYahooFinanceMetadataProvider:
         )
         with pytest.raises(KeyError):
             provider.get_metadata("XX00UNKNOWN0")
+
+    def test_http_error_raises_value_error(self, tmp_path):
+        import requests as _req
+
+        from portfolio_sim import YahooFinanceMetadataProvider, _YahooTickerCache
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta.json",
+            ticker_cache=_YahooTickerCache(),  # isolated — forces network call
+        )
+        bad_resp = MagicMock()
+        bad_resp.raise_for_status.side_effect = _req.exceptions.HTTPError("401 Unauthorized")
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=bad_resp)
+        with (
+            patch("portfolio_sim._yahoo_crumb_session", return_value=(mock_session, "crumb")),
+            pytest.raises(ValueError, match="401"),
+        ):
+            provider.get_metadata("NL0010273215")
+
+    def test_connection_error_raises_value_error(self, tmp_path):
+        import requests as _req
+
+        from portfolio_sim import YahooFinanceMetadataProvider, _YahooTickerCache
+
+        provider = YahooFinanceMetadataProvider(
+            isin_to_ticker={"NL0010273215": "ASML.AS"},
+            cache_path=tmp_path / "meta.json",
+            ticker_cache=_YahooTickerCache(),  # isolated — forces network call
+        )
+        mock_session = MagicMock()
+        mock_session.get.side_effect = _req.exceptions.ConnectionError("network failure")
+        with (
+            patch("portfolio_sim._yahoo_crumb_session", return_value=(mock_session, "crumb")),
+            pytest.raises(ValueError, match="network failure"),
+        ):
+            provider.get_metadata("NL0010273215")
 
 
 # ── Slice 3: Look-through aggregation ─────────────────────────────────────────
@@ -1738,6 +2042,46 @@ class TestAggregatePortfolioComposition:
         row = result.securities[result.securities["isin"] == "NL0010273215"].iloc[0]
         assert row["sector"] == "Technology"
         assert row["country"] == "Netherlands"
+
+    def test_empty_string_snapshot_date_does_not_crash(self):
+        """Empty string from unset env var must not reach _date.fromisoformat."""
+        from portfolio_sim import aggregate_portfolio_composition
+
+        hld = _holdings_df(
+            [
+                {"isin": "IE00ETF00001", "quantity": 100, "price": 200.0},
+            ]
+        )
+        etf_result = ConstituentResult(
+            etf_isin="IE00ETF00001",
+            constituents=[
+                ConstituentRow(isin="NL0010273215", ticker="ASML", name="ASML", weight=0.5),
+            ],
+            coverage_pct=0.5,
+            as_of="2026-01-01",
+            source="yahoo_top_holdings",
+        )
+        const_provider = _make_stub_constituent_provider([etf_result])
+        meta_provider = _make_stub_metadata_provider([_meta("NL0010273215"), _meta("IE00ETF00001")])
+
+        # snapshot_date="" is what the notebook passes when SNAPSHOT_DATE env var is unset
+        result = aggregate_portfolio_composition(
+            hld, const_provider, meta_provider, snapshot_date=""
+        )
+        assert not result.securities.empty
+
+    def test_none_snapshot_date_does_not_crash(self):
+        """Explicit None must also default to today without crashing."""
+        from portfolio_sim import aggregate_portfolio_composition
+
+        hld = _holdings_df([{"isin": "NL0010273215", "quantity": 10, "price": 400.0}])
+        meta_provider = _make_stub_metadata_provider([_meta("NL0010273215")])
+        const_provider = _make_stub_constituent_provider([])
+
+        result = aggregate_portfolio_composition(
+            hld, const_provider, meta_provider, snapshot_date=None
+        )
+        assert not result.securities.empty
 
 
 # ── Slice 4: Dimension breakdown functions ────────────────────────────────────

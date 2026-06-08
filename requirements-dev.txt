@@ -3,3 +3,6 @@ ruff
 requests
 pyarrow
 pdfplumber
+playwright
+yfinance
+openpyxl

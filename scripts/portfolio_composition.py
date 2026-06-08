@@ -185,6 +185,20 @@ def main() -> None:
         snapshot_date=args.snapshot_date,
     )
 
+    # User-provided data warning
+    if not result.etf_coverage.empty and "source" in result.etf_coverage.columns:
+        manual = result.etf_coverage[result.etf_coverage["source"] == "user_provided_file"]
+        if not manual.empty:
+            print(
+                "\n⚠  WARNING: ETF constituent data was sourced from manually downloaded files,\n"
+                "   NOT from a live API. The data may be stale if the fund has rebalanced.\n"
+                "   Affected ETFs: " + ", ".join(manual["etf_isin"].tolist()) + "\n"
+                "   To refresh: download updated files to\n"
+                "     data/private/etf_composition_data_user_provided/\n"
+                "   then re-run:  python scripts/import_etf_holdings.py\n",
+                file=sys.stderr,
+            )
+
     # Coverage warnings
     threshold = args.coverage_warn / 100.0
     if not result.etf_coverage.empty:

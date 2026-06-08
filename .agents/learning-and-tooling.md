@@ -60,6 +60,40 @@ happened and what was fixed.
 
 ---
 
+## Yahoo Finance API — crumb-based authentication (no official docs)
+
+Yahoo Finance has no public API documentation. All endpoint behaviour is
+reverse-engineered. Do not assume how authentication works — check the
+`yfinance` library source (`data.py`) or community issues before implementing.
+
+**Current auth flow (confirmed working as of 2025–2026):**
+
+1. `GET https://fc.yahoo.com` — seeds the A3 session cookie.
+2. `GET https://finance.yahoo.com/` — reinforces the session.
+3. `GET https://query1.finance.yahoo.com/v1/test/getcrumb` — returns a plain-text
+   crumb string valid for the session lifetime.
+4. Append `?crumb=<crumb>` to every `v10/finance/quoteSummary` and related
+   request URL.
+
+This is implemented in `src/portfolio_sim.py` as `_yahoo_crumb_session()`.
+Both `YahooTopHoldingsProvider` and `YahooFinanceMetadataProvider` use it.
+
+**Key failure modes:**
+- `401 Unauthorized` — missing or expired crumb. Clear `_yahoo_crumb_session._cache`
+  and retry.
+- `429 Too Many Requests` — rate-limited. Back off; no official rate limit is published.
+- Empty `quoteSummary.result` — ticker delisted or wrong exchange suffix. Check
+  `data/private/ticker_map.json`.
+
+**Testing convention:** Mock `portfolio_sim._yahoo_crumb_session` (not
+`portfolio_sim.requests.get`) to return a `(mock_session, "test-crumb")` tuple.
+Use an isolated `_YahooTickerCache()` in error-path tests so the module-level
+ticker cache does not suppress the network call.
+
+**Reference:** yfinance PR #1657 (cookie + crumb integration); yfinance `data.py`.
+
+---
+
 ## RTK (Rust Token Killer)
 
 RTK is a transparent CLI proxy that reduces AI agent token consumption by 60–90% by filtering and compressing command output before it reaches the context window. It integrates automatically with Claude Code, Cursor, Copilot, and other AI coding tools — no agent-side code changes are needed.

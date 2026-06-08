@@ -78,6 +78,29 @@ single-position scenario model. It supports FIFO lots by default, flat tax rates
 ECB/Yahoo FX providers, optional Yahoo security price lookup through an ISIN →
 ticker map, and partial exclusion of unsupported corporate actions.
 
+## ETF Look-Through (notebook 08)
+
+Notebook 08 (`08_portfolio_composition.ipynb`) performs ETF constituent
+look-through using a `ChainedConstituentProvider`:
+
+```
+CsvConstituentProvider       ← manual download URLs in etf_download_urls.json
+  → PlaywrightConstituentProvider  ← headless Chromium (full holdings CSV)
+    → JustETFConstituentProvider   ← HTML scraping, top 10 holdings
+      → YahooTopHoldingsProvider   ← Yahoo topHoldings API, top 10
+```
+
+- `JustETFConstituentProvider` scrapes `justetf.com` with `requests` + `bs4`.
+  Returns top-10 holdings with ISIN + weight. Coverage: 20–47% per ETF.
+- `PlaywrightConstituentProvider` uses async playwright in a background thread
+  (avoids Jupyter asyncio conflict). Currently times out on iShares pages from
+  Docker (geo-block / slow JS); falls through to JustETF cleanly.
+- Yahoo `topHoldings` API returns empty `holdings` for European-listed ETFs
+  (EXXT.DE, VEUR.AS, etc.) — it is a last resort that rarely succeeds here.
+- Docker image must include Chromium OS deps. On Ubuntu Noble use `libasound2t64`
+  (not `libasound2` — the package was renamed in Noble).
+- Current unresolved weight: ~19.7% (down from 40.99% before look-through).
+
 ## Known Gotchas
 
 - Bear scenarios must be ordered numerically by `drawdown`, not by labels like `Bear -6%`; string sorting creates confusing column order.

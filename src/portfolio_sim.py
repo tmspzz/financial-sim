@@ -490,13 +490,18 @@ def _parse_ishares_date(raw: str) -> str:
         return _date.fromisoformat(raw).isoformat()
     except ValueError:
         pass
-    # Try DD/Mon/YYYY or DD-Mon-YYYY
+    # Try DD/Mon/YYYY or DD-Mon-YYYY (e.g. "31/Dec/2025", "30-Jun-2025")
     m = re.match(r"(\d{1,2})[/-]([A-Za-z]{3})[/-](\d{4})", raw)
     if m:
         day, mon_str, year = int(m.group(1)), m.group(2).capitalize(), int(m.group(3))
         month = _MONTH_ABBR.get(mon_str)
         if month:
             return _date(year, month, day).isoformat()
+    # Try DD/MM/YYYY or DD-MM-YYYY (e.g. "31/03/2026" from justETF)
+    m = re.match(r"(\d{1,2})[/-](\d{2})[/-](\d{4})", raw)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return _date(year, month, day).isoformat()
     raise ValueError(f"Cannot parse date: {raw!r}")
 
 
@@ -536,7 +541,8 @@ class CsvConstituentProvider(ETFConstituentProvider):
 
         return result
 
-    def _parse_csv(self, etf_isin: str, text: str) -> ConstituentResult:
+    @staticmethod
+    def _parse_csv(etf_isin: str, text: str) -> ConstituentResult:
         lines = text.splitlines()
 
         # Find the header row: first row containing both "ISIN" and "Weight"
@@ -653,6 +659,27 @@ class CsvConstituentProvider(ETFConstituentProvider):
         self._cache_path(isin).write_text(json.dumps(data, indent=2))
 
 
+def _yahoo_crumb_session() -> tuple[requests.Session, str]:
+    """Return a requests Session with Yahoo Finance cookies and a valid crumb.
+
+    Yahoo's quoteSummary v10 API requires a crumb obtained from their consent
+    endpoint.  The crumb is stable for the lifetime of the cookie jar, so we
+    fetch it once per process and cache it on the function object.
+    """
+    if getattr(_yahoo_crumb_session, "_cache", None):
+        return _yahoo_crumb_session._cache  # type: ignore[attr-defined]
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    # Seed the cookie jar via the consent/check redirect.
+    session.get("https://fc.yahoo.com", timeout=10)
+    session.get("https://finance.yahoo.com/", timeout=10)
+    crumb_resp = session.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+    crumb = crumb_resp.text.strip()
+    _yahoo_crumb_session._cache = (session, crumb)  # type: ignore[attr-defined]
+    return session, crumb
+
+
 class YahooTopHoldingsProvider(ETFConstituentProvider):
     """Yahoo Finance topHoldings fallback.
 
@@ -676,9 +703,13 @@ class YahooTopHoldingsProvider(ETFConstituentProvider):
         if not ticker:
             raise KeyError(f"No ticker mapping for ISIN {isin!r}")
 
-        url = f"{self._BASE}/{ticker}?modules=topHoldings"
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
+        try:
+            session, crumb = _yahoo_crumb_session()
+            url = f"{self._BASE}/{ticker}?modules=topHoldings&crumb={crumb}"
+            resp = session.get(url, timeout=15)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise ValueError(f"Yahoo Finance request failed for {ticker!r}: {exc}") from exc
         data = resp.json()
 
         result_list = data.get("quoteSummary", {}).get("result") or []
@@ -705,6 +736,308 @@ class YahooTopHoldingsProvider(ETFConstituentProvider):
             as_of=as_of,
             source="yahoo_top_holdings",
         )
+
+
+# Default product-page URLs for known ETFs (ISIN → provider page URL).
+# Used by PlaywrightConstituentProvider when no explicit map is supplied.
+_DEFAULT_ETF_PRODUCT_URLS: dict[str, str] = {
+    "DE000A0F5UF5": "https://www.ishares.com/de/privatanleger/de/produkte/251896/ishares-nasdaq100-ucits-etf-de-fund",
+    "IE00B945VV12": "https://www.vanguardinvestor.co.uk/investments/vanguard-ftse-developed-europe-ucits-etf-eur-distributing",
+    "LU0274209740": "https://etf.dws.com/en/LU0274209740-msci-japan-ucits-etf-1c/",
+    "IE00BTJRMP35": "https://etf.dws.com/en/IE00BTJRMP35-msci-em-markets-1c/",
+}
+
+# justETF profile page base URL
+_JUSTETF_PROFILE_URL = "https://www.justetf.com/en/etf-profile.html"
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+class JustETFConstituentProvider(ETFConstituentProvider):
+    """Scrapes top-10 ETF holdings from justETF (https://www.justetf.com).
+
+    Works by ISIN. Returns up to 10 constituents with ISINs and weights.
+    Requires beautifulsoup4 (already in the project Docker image).
+
+    cache_dir: if given, parsed results are stored as JSON so repeated runs
+        skip the HTTP request.
+    """
+
+    def __init__(self, cache_dir: Path | None = None) -> None:
+        self._cache_dir = cache_dir
+
+    def get_constituents(self, isin: str) -> ConstituentResult:
+        try:
+            from bs4 import BeautifulSoup  # type: ignore[import]
+        except ImportError as exc:
+            raise KeyError(f"beautifulsoup4 required for JustETF scraping of {isin}") from exc
+
+        if self._cache_dir is not None:
+            cached = self._load_cache(isin)
+            if cached is not None:
+                return cached
+
+        resp = requests.get(
+            _JUSTETF_PROFILE_URL,
+            params={"isin": isin},
+            headers={"User-Agent": _BROWSER_UA},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            raise ValueError(f"justETF returned HTTP {resp.status_code} for {isin}")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        constituents: list[ConstituentRow] = []
+        total_weight = 0.0
+        for row in soup.find_all("tr", attrs={"data-testid": "etf-holdings_top-holdings_row"}):
+            name_el = row.find("a", attrs={"data-testid": "tl_etf-holdings_top-holdings_link_name"})
+            pct_el = row.find(
+                "span",
+                attrs={"data-testid": "tl_etf-holdings_top-holdings_value_percentage"},
+            )
+            if not (name_el and pct_el):
+                continue
+            pct_match = re.search(r"([\d.]+)", pct_el.get_text(strip=True))
+            if not pct_match:
+                continue
+            w = float(pct_match.group(1)) / 100.0
+            href = name_el.get("href", "")
+            holding_isin = (
+                href.split("/stock-profiles/")[-1] if "/stock-profiles/" in href else None
+            )
+            constituents.append(
+                ConstituentRow(
+                    isin=holding_isin, ticker=None, name=name_el.get_text(strip=True), weight=w
+                )
+            )
+            total_weight += w
+
+        if not constituents:
+            raise ValueError(f"No holdings found on justETF for {isin}")
+
+        ref_el = soup.find("div", attrs={"data-testid": "tl_etf-holdings_reference-date"})
+        as_of = _date.today().isoformat()
+        if ref_el:
+            with contextlib.suppress(ValueError):
+                as_of = _parse_ishares_date(ref_el.get_text(strip=True))
+
+        result = ConstituentResult(
+            etf_isin=isin,
+            constituents=constituents,
+            coverage_pct=total_weight,
+            as_of=as_of,
+            source="justetf_top_holdings",
+        )
+        if self._cache_dir is not None:
+            self._save_cache(isin, result)
+        return result
+
+    def _cache_path(self, isin: str) -> Path:
+        assert self._cache_dir is not None
+        return self._cache_dir / f"{isin}_justetf.json"
+
+    def _load_cache(self, isin: str) -> ConstituentResult | None:
+        path = self._cache_path(isin)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        return ConstituentResult(
+            etf_isin=data["etf_isin"],
+            constituents=[ConstituentRow(**c) for c in data["constituents"]],
+            coverage_pct=data["coverage_pct"],
+            as_of=data["as_of"],
+            source=data["source"],
+        )
+
+    def _save_cache(self, isin: str, result: ConstituentResult) -> None:
+        assert self._cache_dir is not None
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "etf_isin": result.etf_isin,
+            "constituents": [
+                {"isin": c.isin, "ticker": c.ticker, "name": c.name, "weight": c.weight}
+                for c in result.constituents
+            ],
+            "coverage_pct": result.coverage_pct,
+            "as_of": result.as_of,
+            "source": result.source,
+        }
+        self._cache_path(isin).write_text(json.dumps(data, indent=2))
+
+
+class PlaywrightConstituentProvider(ETFConstituentProvider):
+    """Downloads full ETF holdings CSVs by driving a headless Chromium browser.
+
+    Navigates to the provider's product page, intercepts the CSV download
+    network request, and parses the response with CsvConstituentProvider.
+
+    provider_url_map: ISIN → product page URL.  Defaults to
+        _DEFAULT_ETF_PRODUCT_URLS for the four known portfolio ETFs.
+    cache_dir: if given, parsed results are cached as JSON (same schema as
+        CsvConstituentProvider) so repeated runs skip the browser round-trip.
+    """
+
+    # CSS selectors / URL patterns that trigger a CSV download on each provider page
+    _DOWNLOAD_TRIGGERS: list[str] = [
+        "a[href*='fileType=csv']",
+        "button[data-file-type='csv']",
+        "[data-export-url]",
+        "a[download]",
+        "a[href*='.csv']",
+        "a[href*='holdings']",
+    ]
+    _CSV_URL_PATTERNS: list[str] = [
+        r"\.ajax\?.*fileType=csv",
+        r"download.*\.csv",
+        r"holdings.*\.csv",
+        r"\.csv(\?|$)",
+    ]
+
+    def __init__(
+        self,
+        provider_url_map: dict[str, str] | None = None,
+        cache_dir: Path | None = None,
+    ) -> None:
+        self._url_map = dict(provider_url_map or _DEFAULT_ETF_PRODUCT_URLS)
+        self._cache_dir = cache_dir
+
+    def get_constituents(self, isin: str) -> ConstituentResult:
+        try:
+            import playwright  # noqa: F401  # type: ignore[import]
+        except ImportError as exc:
+            raise KeyError(f"playwright required for browser-based ETF fetching of {isin}") from exc
+
+        if isin not in self._url_map:
+            raise KeyError(f"No product page URL configured for ISIN {isin!r}")
+
+        if self._cache_dir is not None:
+            cached = self._load_cache(isin)
+            if cached is not None:
+                return cached
+
+        product_url = self._url_map[isin]
+        csv_text = self._fetch_csv_via_browser(isin, product_url)
+        result = CsvConstituentProvider._parse_csv(isin, csv_text)
+
+        if self._cache_dir is not None:
+            self._save_cache(isin, result)
+        return result
+
+    def _fetch_csv_via_browser(self, isin: str, product_url: str) -> str:
+        """Run Playwright in a dedicated thread to avoid asyncio event-loop conflicts.
+
+        Jupyter notebooks run inside an asyncio loop; sync_playwright cannot be used
+        directly there. Spawning a background thread with its own event loop sidesteps
+        the conflict and works in both notebook and script contexts.
+        """
+        import asyncio
+        import threading
+
+        result_box: list[str] = []
+        error_box: list[Exception] = []
+
+        async def _async_fetch() -> str:
+            from playwright.async_api import async_playwright  # type: ignore[import]
+
+            captured: list[str] = []
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent=_BROWSER_UA,
+                    accept_downloads=True,
+                )
+                page = await context.new_page()
+
+                # Intercept responses that look like CSV holdings files
+                async def handle_response(response) -> None:
+                    url = response.url
+                    if any(re.search(pat, url) for pat in self._CSV_URL_PATTERNS):
+                        with contextlib.suppress(Exception):
+                            body = await response.body()
+                            captured.append(body.decode("utf-8", errors="replace"))
+
+                page.on("response", handle_response)
+                await page.goto(product_url, wait_until="load", timeout=30_000)
+
+                # Try clicking any element that looks like a CSV download trigger
+                for selector in self._DOWNLOAD_TRIGGERS:
+                    with contextlib.suppress(Exception):
+                        el = await page.query_selector(selector)
+                        if el:
+                            async with page.expect_download(timeout=15_000) as dl_info:
+                                await el.click()
+                            download = await dl_info.value
+                            path = download.path()
+                            if path:
+                                captured.append(Path(path).read_text(errors="replace"))
+                            break
+
+                await browser.close()
+
+            if not captured:
+                raise ValueError(
+                    f"Playwright could not capture a CSV download from {product_url} for {isin}"
+                )
+            return captured[0]
+
+        def _thread_main() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result_box.append(loop.run_until_complete(_async_fetch()))
+            except Exception as exc:
+                error_box.append(exc)
+            finally:
+                loop.close()
+
+        t = threading.Thread(target=_thread_main, daemon=True)
+        t.start()
+        t.join(timeout=45)
+
+        if t.is_alive():
+            raise ValueError(f"Playwright fetch timed out for {isin} ({product_url})")
+        if error_box:
+            raise ValueError(
+                f"Playwright failed for {isin} ({product_url}): {error_box[0]}"
+            ) from error_box[0]
+        return result_box[0]
+
+    def _cache_path(self, isin: str) -> Path:
+        assert self._cache_dir is not None
+        return self._cache_dir / f"{isin}_playwright.json"
+
+    def _load_cache(self, isin: str) -> ConstituentResult | None:
+        path = self._cache_path(isin)
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        return ConstituentResult(
+            etf_isin=data["etf_isin"],
+            constituents=[ConstituentRow(**c) for c in data["constituents"]],
+            coverage_pct=data["coverage_pct"],
+            as_of=data["as_of"],
+            source=data["source"],
+        )
+
+    def _save_cache(self, isin: str, result: ConstituentResult) -> None:
+        assert self._cache_dir is not None
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "etf_isin": result.etf_isin,
+            "constituents": [
+                {"isin": c.isin, "ticker": c.ticker, "name": c.name, "weight": c.weight}
+                for c in result.constituents
+            ],
+            "coverage_pct": result.coverage_pct,
+            "as_of": result.as_of,
+            "source": result.source,
+        }
+        self._cache_path(isin).write_text(json.dumps(data, indent=2))
 
 
 class ChainedConstituentProvider(ETFConstituentProvider):
@@ -829,9 +1162,13 @@ class YahooFinanceMetadataProvider:
 
         raw = self._ticker_cache.get(ticker)
         if raw is None:
-            url = f"{_YAHOO_SUMMARY_BASE}/{ticker}?modules={_SUMMARY_MODULES}"
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            resp.raise_for_status()
+            try:
+                session, crumb = _yahoo_crumb_session()
+                url = f"{_YAHOO_SUMMARY_BASE}/{ticker}?modules={_SUMMARY_MODULES}&crumb={crumb}"
+                resp = session.get(url, timeout=15)
+                resp.raise_for_status()
+            except requests.exceptions.RequestException as exc:
+                raise ValueError(f"Yahoo Finance request failed for {ticker!r}: {exc}") from exc
             data = resp.json()
             result_list = (data.get("quoteSummary") or {}).get("result") or []
             if not result_list:
@@ -980,7 +1317,7 @@ def aggregate_portfolio_composition(
     holdings_df must contain: isin, market_value columns (in EUR).
     snapshot_date is used for ETF constituent staleness checks.
     """
-    if snapshot_date is None:
+    if not snapshot_date:
         snapshot_date = _date.today().isoformat()
 
     total_portfolio_eur = holdings_df["market_value"].sum()

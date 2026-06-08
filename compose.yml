@@ -6,9 +6,15 @@ services:
     image: financial-sim:latest
     environment:
       PYTHONPATH: /home/jovyan/work/src
-      # Set DB_PDF_PATH to your Deutsche Bank report before running docker compose up.
-      # Example:  DB_PDF_PATH=data/private/report.pdf docker compose up
+      # Source .env.private before running docker compose up so these are populated.
+      # Example:  source .env.private && docker compose up
       DB_PDF_PATH: ${DB_PDF_PATH:-}
+      HOLDINGS_PATH: ${HOLDINGS_PATH:-}
+      TRANSACTIONS_PATH: ${TRANSACTIONS_PATH:-}
+      TICKER_MAP_PATH: ${TICKER_MAP_PATH:-}
+      ETF_URLS_PATH: ${ETF_URLS_PATH:-}
+      ETF_OVERRIDES_PATH: ${ETF_OVERRIDES_PATH:-}
+      SNAPSHOT_DATE: ${SNAPSHOT_DATE:-}
     ports:
       - "8888:8888"
     volumes:

@@ -35,30 +35,73 @@ your ASML exposure without appearing in the direct holdings list.
 - ETF domicile is derived from the two-letter ISIN country prefix (IE → Ireland, etc.).
 - **No tax calculation is performed.** ETF structure and domicile are display-only.
 
+## ETF constituent data — manual download workflow
+
+Full holdings data (100+ rows) for the four portfolio ETFs is obtained by
+manually downloading provider files and importing them with
+`scripts/import_etf_holdings.py`. This is necessary because:
+- iShares product pages are JavaScript-rendered (Playwright times out inside Docker)
+- The vice01.ishares.com AJAX endpoint returns a JS bot-detection challenge
+- Vanguard/DWS pages are also JS-heavy
+
+**Source files** (place in `data/private/etf_composition_data_user_provided/`):
+
+| ETF | Provider | File | ISIN source |
+|-----|----------|------|-------------|
+| iShares NASDAQ-100 (DE000A0F5UF5) | iShares | `EXXT_holdings.csv` | static supplement table |
+| Xtrackers MSCI Japan (LU0274209740) | DWS | `Constituent_LU0274209740.xlsx` | from file |
+| Xtrackers MSCI EM (IE00BTJRMP35) | DWS | `Constituent_IE00BTJRMP35.xlsx` | from file |
+| Vanguard FTSE Dev. Europe (IE00B945VV12) | Vanguard | `Holdings details - Vanguard…xlsx` | skipped (500 EU tickers) |
+
+**Import command:**
+```bash
+docker run --rm \
+  -v "$PWD":/home/jovyan/work \
+  -w /home/jovyan/work \
+  -e PYTHONPATH=/home/jovyan/work/src \
+  financial-sim:latest \
+  python scripts/import_etf_holdings.py
+```
+
+Coverage after import: iShares 98.8%, DWS Japan 100%, DWS EM 100%, Vanguard 0%.
+The `_UNRESOLVED_` residual dropped from ~20% to under 1% of portfolio weight.
+
 ## Files affected
 
 - `src/portfolio_sim.py` — added:
   - `ConstituentRow`, `ConstituentResult` dataclasses
   - `ETFConstituentProvider` ABC
   - `CsvConstituentProvider` (iShares/Amundi CSV downloads with sidecar cache)
+  - `JustETFConstituentProvider` (bs4 scraping of justetf.com, top 10 holdings)
+  - `PlaywrightConstituentProvider` (headless Chromium, full CSV via browser
+    automation; runs in dedicated thread to avoid Jupyter asyncio conflict)
   - `YahooTopHoldingsProvider` (Yahoo Finance topHoldings fallback)
   - `ChainedConstituentProvider` (try providers in order)
   - `SecurityMetadata` dataclass, `_YahooTickerCache`, `YahooFinanceMetadataProvider`
   - `CompositionResult` dataclass, `aggregate_portfolio_composition()`
   - `breakdown_by_sector/industry/country/region/currency/asset_class/market_cap_tier/beta_bucket/etf_structure/etf_domicile()`
-- `tests/test_portfolio_sim.py` — added tests for all new classes and functions
-  (Slice 1–5 test classes; 47 new tests; total suite 196 passed)
+- `tests/test_portfolio_sim.py` — 216 tests pass, 10 skipped
 - `scripts/portfolio_composition.py` — new CLI script
 - `notebooks/08_portfolio_composition.ipynb` — new notebook
 
 ## Known limitations
 
-- `CsvConstituentProvider` requires the user to maintain `data/private/etf_download_urls.json`
-  mapping ETF ISINs to their provider CSV download URLs. There is no auto-discovery from ISIN
-  alone; URL formats differ per provider and require a one-time setup.
-- Yahoo Finance `topHoldings` returns only the top ~10–15 holdings. For broad-market ETFs
-  this typically covers 5–15% of the fund by weight — useful as a fallback but not a
-  substitute for full constituent data.
+- **iShares ISIN supplement** (`_NASDAQ100_ISIN_SUPPLEMENT` in `import_etf_holdings.py`)
+  is a 42-entry static table for US-listed tickers that yfinance returns `"-"` for.
+  Update after significant NASDAQ-100 rebalances. MRVL (Marvell, reincorporated 2021)
+  remains unresolved (~0.3% portfolio weight).
+- **Vanguard Europe** has 0% ISIN coverage — 500 EU tickers would saturate yfinance rate
+  limits. It is ~1% of the portfolio; use `--etf IE00B945VV12` to force resolution.
+- **yfinance ISIN data quality**: some NASDAQ-listed foreign companies receive wrong country
+  ISINs (GOOGL → Canadian ISIN, BKR → Argentine ISIN). Affects ~3–5% of iShares weight.
+- `CsvConstituentProvider` uses sentinel URLs (`manually_provided://user_downloaded`) in
+  `etf_download_urls.json`; if the cache is cleared, the chain falls through to JustETF.
+- `JustETFConstituentProvider` returns only the top 10 holdings (20–47% coverage). It is
+  the fallback when cache is absent or import has not been run.
+- `PlaywrightConstituentProvider` times out on iShares product pages from Docker (JS-heavy;
+  `load` event never fires reliably). It falls through to JustETF via the chain.
+- Yahoo Finance `topHoldings` returns empty `holdings` for European-listed ETFs — it is
+  rarely useful for this portfolio.
 - Beta is S&P 500 relative only. Multi-benchmark beta is deferred.
 - The `_UNRESOLVED_` row has no sector, country, or beta metadata — it appears in the
   "Unknown" bucket of every breakdown dimension.
